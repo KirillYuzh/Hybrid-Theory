@@ -71,9 +71,8 @@ class UnifiedScorer:
 
         if self._external:
             addrs = features.get('from_address', tx_ids)
-            external_risk = addrs.apply(
-                lambda a: 1.0 if self._external.is_illicit(a) else 0.0
-            ).values
+            illicit_set = set(self._external.get_illicit_addresses())
+            external_risk = np.array([1.0 if a in illicit_set else 0.0 for a in addrs])
         else:
             external_risk = np.zeros(len(features))
 
@@ -85,6 +84,7 @@ class UnifiedScorer:
         )
 
         risk_zone = pd.cut(risk_score, bins=[0, 0.3, 0.7, 1.0], labels=['GREEN', 'YELLOW', 'RED'])
+        risk_zone_arr = risk_zone.astype(str).values
 
         from kyt_engine.models.triage import TriageSystem
         tsys = TriageSystem()
@@ -94,7 +94,7 @@ class UnifiedScorer:
             results.append(ScoringResult(
                 tx_id=int(tx_ids.iloc[i]),
                 risk_score=float(risk_score[i]),
-                risk_zone=risk_zone.iloc[i],
+                risk_zone=risk_zone_arr[i],
                 triage_level=triage_result['priority'].iloc[i],
                 lgbm_proba=float(lgbm_proba[i]),
                 k_score=float(k_scores.iloc[i]),

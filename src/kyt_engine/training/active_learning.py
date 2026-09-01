@@ -48,7 +48,7 @@ class UncertaintySampler:
         self,
         proba: np.ndarray,
         k_scores: np.ndarray,
-        features: pd.DataFrame,
+        features: pd.DataFrame | np.ndarray,
         top_k: int | None = None,
     ) -> list[UncertainSample]:
         """Select top_k most uncertain samples for human labeling."""
@@ -57,14 +57,14 @@ class UncertaintySampler:
         scores = entropy + k_scores
         top_indices = np.argsort(scores)[::-1][:k]
 
-        n_features = len(features)
+        n = len(proba)
         samples: list[UncertainSample] = []
         for idx in top_indices:
             i = int(idx)
-            if i >= n_features:
+            if i >= n:
                 continue
             e = float(entropy[i])
-            ks = float(k_scores[i])
+            ks = float(np.asarray(k_scores)[i])
 
             if e > self._entropy_threshold and ks > self._kscore_threshold:
                 priority = "HIGH"
@@ -73,7 +73,12 @@ class UncertaintySampler:
             else:
                 priority = "LOW"
 
-            feat_vals = {col: float(features.iloc[i][col]) for col in features.columns}
+            if isinstance(features, pd.DataFrame):
+                feat_vals = {col: float(features.iloc[i][col]) for col in features.columns}
+            else:
+                feat_vals = {f"f{j}": float(features[i, j]) 
+                            for j in range(min(len(features[i]), 167))}
+
             samples.append(
                 UncertainSample(
                     index=i,

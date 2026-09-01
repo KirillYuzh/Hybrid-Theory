@@ -232,3 +232,4 @@ mlartifacts/
 # Miscellaneous
 K-BRAIN/
 temp.md
+data/external/*
