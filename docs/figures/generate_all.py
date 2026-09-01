@@ -71,10 +71,10 @@ print("[✓] class_distribution.png")
 # 2. MODEL COMPARISON (grouped bar chart)
 # ═══════════════════════════════════════════════════════════════════════════
 models = ["LightGBM\n(val: t=37-44)", "Autoencoder\n(val: t=37-44)", "Ансамбль\n(test: t=45-49)"]
-precision = [0.980, 0.925, 0.968]
-recall    = [0.998, 1.000, 0.999]
-f1        = [0.989, 0.961, 0.983]
-auc_roc   = [0.951, 0.561, 0.827]
+precision = [0.977, 0.925, 0.968]
+recall    = [0.999, 1.000, 0.999]
+f1        = [0.988, 0.961, 0.983]
+auc_roc   = [0.955, 0.561, 0.858]
 
 metrics = np.array([precision, recall, f1, auc_roc])
 metric_names = ["Точность", "Полнота", "F1-мера", "AUC-ROC"]
@@ -109,9 +109,9 @@ print("[✓] model_comparison.png")
 # ═══════════════════════════════════════════════════════════════════════════
 fig, axes = plt.subplots(1, 3, figsize=(16, 5))
 
-cm_lgb = np.array([[572, 175], [14, 9134]])  # val: licit=747, illicit=9148
-cm_ae  = np.array([[0, 747], [0, 9148]])     # val: AE predicts all illicit
-cm_ens = np.array([[3, 118], [5, 3600]])      # test: licit=121, illicit=3605
+cm_lgb = np.array([[532, 215], [10, 9138]])  # val: licit=747, illicit=9148
+cm_ae  = np.array([[0, 747], [0, 9148]])      # val: AE predicts all illicit
+cm_ens = np.array([[2, 119], [3, 3602]])       # test: licit=121, illicit=3605
 
 titles = ["LightGBM (временной)", "Autoencoder", "Ансамбль"]
 cms    = [cm_lgb, cm_ae, cm_ens]
@@ -136,12 +136,13 @@ print("[✓] confusion_matrices.png")
 # 4. FEATURE IMPORTANCE (horizontal bar, top 20)
 # ═══════════════════════════════════════════════════════════════════════════
 features = [
-    "f1 (value)", "f52", "f54", "f87", "f51", "f141", "f137", "f15",
-    "f57", "f129", "f136", "f88", "f99", "f93", "f2", "in_degree",
-    "out_degree", "f44", "f76", "time_step",
+    "f1 (value)", "f52", "f51", "f57", "f87", "f137", "f15",
+    "f141", "f2", "f129", "f105", "f93", "f131", "f54", "f136",
+    "f88", "f89", "f99", "f7", "f138",
 ]
-importances = [2417, 1883, 1338, 1236, 1163, 1096, 1039, 957,
-               957, 924, 859, 832, 810, 719, 714, 680, 620, 590, 560, 540]
+importances = [1527, 840, 661, 608, 551, 524, 517,
+               474, 463, 422, 416, 384, 382, 371, 364,
+               356, 333, 332, 324, 323]
 
 # Reverse for bottom-to-top reading
 features_r   = features[::-1]
@@ -257,14 +258,14 @@ def make_roc_curve(target_auc, n=200):
     tpr[0], tpr[-1] = 0.0, 1.0
     return fpr, tpr
 
-fpr_lgb, tpr_lgb = make_roc_curve(0.9511)
+fpr_lgb, tpr_lgb = make_roc_curve(0.9549)
 fpr_ae,  tpr_ae  = make_roc_curve(0.5609)
-fpr_ens, tpr_ens = make_roc_curve(0.8266)
+fpr_ens, tpr_ens = make_roc_curve(0.8583)
 
 fig, ax = plt.subplots(figsize=(8, 7))
-ax.plot(fpr_lgb, tpr_lgb, color=BLUE,  linewidth=2.5, label="LightGBM (AUC = 0.951)", zorder=3)
+ax.plot(fpr_lgb, tpr_lgb, color=BLUE,  linewidth=2.5, label="LightGBM (AUC = 0.955)", zorder=3)
 ax.plot(fpr_ae,  tpr_ae,  color=RED,   linewidth=2.5, label="Autoencoder (AUC = 0.561)", zorder=3)
-ax.plot(fpr_ens, tpr_ens, color=GREEN, linewidth=2.5, label="Ансамбль (AUC = 0.827)", zorder=3)
+ax.plot(fpr_ens, tpr_ens, color=GREEN, linewidth=2.5, label="Ансамбль (AUC = 0.858)", zorder=3)
 ax.plot([0, 1], [0, 1], "--", color=GREY, linewidth=1.2, label="Случайный (AUC = 0.500)")
 
 ax.fill_between(fpr_lgb, tpr_lgb, alpha=0.08, color=BLUE)
