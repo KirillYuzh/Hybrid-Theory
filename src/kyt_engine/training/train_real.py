@@ -19,6 +19,7 @@ from sklearn.metrics import (
 )
 
 from kyt_engine.features._utils import find_best_threshold, prepare_features
+from kyt_engine.features.behavioral_v2 import compute_behavioral_features
 
 logger = logging.getLogger(__name__)
 
@@ -333,6 +334,20 @@ def run_training() -> None:
 
     features = features.merge(graph_feats, on="txId", how="left")
     features = features.merge(temporal_feats, on="txId", how="left")
+
+    # Add from_address (Elliptic uses txId as proxy for address)
+    if "from_address" not in features.columns:
+        features["from_address"] = features["txId"].astype(str)
+    if "to_address" not in features.columns:
+        features["to_address"] = features["txId"].astype(str)
+
+    # Compute behavioral v2 features (multi-window aggregations per address)
+    logger.info("Computing behavioral v2 features...")
+    bh = compute_behavioral_features(features)
+
+    # Merge behavioral features back (left join on from_address)
+    features = features.merge(bh, left_on="from_address", right_index=True, how="left")
+    features = features.fillna(0.0)
 
     split = temporal_split(features, label_map, train_end=36, val_end=44)
 

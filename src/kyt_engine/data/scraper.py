@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import csv
+import hashlib
+import io
 import json
 import logging
+import time
 import urllib.request
 import urllib.error
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -14,6 +18,7 @@ logger = logging.getLogger(__name__)
 
 ROOT = Path(__file__).resolve().parents[3]
 DATA_DIR = ROOT / "data" / "external"
+CACHE_DIR = DATA_DIR / "cache"
 
 
 @dataclass
@@ -25,66 +30,160 @@ class LabeledAddress:
     category: str = ""
 
 
+def cached_fetch(url: str, max_age_hours: int = 24, timeout: int = 30) -> dict | list | str:
+    """Fetch URL with filesystem caching and exponential-backoff retry."""
+    cache_key = hashlib.md5(url.encode()).hexdigest()
+    cache_path = CACHE_DIR / f"{cache_key}.json"
+
+    if cache_path.exists():
+        age = time.time() - cache_path.stat().st_mtime
+        if age < max_age_hours * 3600:
+            try:
+                return json.loads(cache_path.read_text())
+            except json.JSONDecodeError:
+                pass
+
+    last_exc: Exception | None = None
+    for attempt in range(3):
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": "kyt-engine/1.0"})
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                body = resp.read().decode()
+            # Try to parse as JSON; fall back to raw string
+            try:
+                data = json.loads(body)
+            except json.JSONDecodeError:
+                data = body
+            CACHE_DIR.mkdir(parents=True, exist_ok=True)
+            if isinstance(data, (dict, list)):
+                cache_path.write_text(json.dumps(data))
+            return data
+        except Exception as exc:
+            last_exc = exc
+            logger.warning("fetch %s attempt %d failed: %s", url, attempt + 1, exc)
+            time.sleep(2 ** attempt)
+
+    raise RuntimeError(f"Failed to fetch {url} after 3 attempts: {last_exc}")
+
+
 def _fetch_url(url: str, timeout: int = 30) -> str:
-    """Fetch raw text from *url* with a standard User-Agent header."""
+    """Fetch raw text from *url* (no caching, for internal helpers)."""
     req = urllib.request.Request(url, headers={"User-Agent": "kyt-engine/1.0"})
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         return resp.read().decode()
 
 
-def _addresses_to_dicts(addresses: list[LabeledAddress]) -> list[dict]:
-    return [
-        {
-            "address": a.address,
-            "label": a.label,
-            "source": a.source,
-            "timestamp": a.timestamp,
-            "category": a.category,
-        }
-        for a in addresses
+# ---------------------------------------------------------------------------
+# GoPlus Token Security
+# ---------------------------------------------------------------------------
+
+class GoPlusChecker:
+    """Checks token security via GoPlus API.
+
+    Detects honeypots, high tax tokens, hidden mint, etc.
+    chain_id: 1=ETH, 56=BSC, 137=Polygon, etc.
+    """
+
+    BASE_URL = "https://api.gopluslabs.io/api/v1"
+
+    def check_token(self, contract_address: str, chain_id: int = 1) -> dict:
+        """Check a single token for security issues.
+
+        Returns a dict with keys like: is_honeypot, buy_tax, sell_tax,
+        cannot_sell_all, hidden_owner, is_open_source, etc.
+        """
+        url = f"{self.BASE_URL}/token_security/{chain_id}?contract_addresses={contract_address}"
+        data = cached_fetch(url, max_age_hours=1)
+
+        result_map = data.get("result", {})
+        # GoPlus returns addresses as keys; grab the first (only) entry
+        if isinstance(result_map, dict):
+            for _addr, info in result_map.items():
+                return info if isinstance(info, dict) else {}
+        return {}
+
+    def check_batch(self, addresses: list[str], chain_id: int = 1) -> list[dict]:
+        """Check multiple tokens (max 100 per request)."""
+        results: list[dict] = []
+        for chunk_start in range(0, len(addresses), 100):
+            chunk = addresses[chunk_start : chunk_start + 100]
+            joined = ",".join(chunk)
+            url = f"{self.BASE_URL}/token_security/{chain_id}?contract_addresses={joined}"
+            data = cached_fetch(url, max_age_hours=1)
+            result_map = data.get("result", {})
+            if isinstance(result_map, dict):
+                for addr in chunk:
+                    info = result_map.get(addr, {})
+                    results.append(info if isinstance(info, dict) else {})
+            else:
+                results.extend([{}] * len(chunk))
+        return results
+
+
+# ---------------------------------------------------------------------------
+# CryptoScamDB replacement — uses ethereum-lists/scam-db GitHub mirror
+# ---------------------------------------------------------------------------
+
+class ScamDBScraper:
+    """Fetches known scam/illicit addresses from ethereum-lists scam-db mirror.
+
+    The original CryptoScamDB API is dead (502). This uses the community
+    maintained GitHub mirror of scam address lists.
+    """
+
+    REPOS = [
+        # ethereum-lists maintains curated scam-address lists
+        "https://raw.githubusercontent.com/ethereum-lists/scam-db/main/data/addresses.json",
+        # Alt: transaction revert / phishing list
+        "https://raw.githubusercontent.com/ethereum-lists/master/addresses/ETH/0x0000000000000000000000000000000000000000.json",
     ]
 
-
-class CryptoScamDBScraper:
-    """Scrapes CryptoScamDB for known scam addresses."""
-
-    BASE_URL = "https://api.cryptoscamdb.org/v1"
-
-    def fetch(self, max_pages: int = 5) -> list[LabeledAddress]:
+    def fetch(self) -> list[LabeledAddress]:
         all_addresses: list[LabeledAddress] = []
         now = datetime.now(timezone.utc).isoformat()
 
-        for page in range(1, max_pages + 1):
-            url = f"{self.BASE_URL}/addresses?page={page}"
+        for url in self.REPOS:
             try:
-                data = json.loads(_fetch_url(url))
-            except (urllib.error.URLError, json.JSONDecodeError, OSError) as e:
-                logger.warning("CryptoScamDB page %d failed: %s", page, e)
-                break
+                data = cached_fetch(url, max_age_hours=12)
+            except Exception as e:
+                logger.warning("ScamDB fetch failed for %s: %s", url, e)
+                continue
 
-            result = data.get("result", [])
-            if not result:
-                break
+            items: list[dict] = []
+            if isinstance(data, list):
+                items = data if all(isinstance(x, dict) for x in data) else []
+            elif isinstance(data, dict):
+                items = data.get("result", data.get("addresses", []))
+                if not items:
+                    # Might be {address: {tag: ...}} format
+                    for addr, info in data.items():
+                        if isinstance(info, dict) and addr != "result":
+                            items.append({"address": addr, **info})
 
-            for entry in result:
-                addr = entry.get("address", "")
-                if not addr:
+            for entry in items:
+                if not isinstance(entry, dict):
                     continue
-                tag = entry.get("tag", "")
-                category = tag.lower() if tag else "scam"
+                addr = entry.get("address", "")
+                if not addr or not addr.startswith("0x"):
+                    continue
+                tag = entry.get("tag", entry.get("category", ""))
                 all_addresses.append(
                     LabeledAddress(
                         address=addr,
                         label="illicit",
-                        source="cryptoscamdb",
+                        source="scamdb",
                         timestamp=now,
-                        category=category,
+                        category=str(tag).lower() if tag else "scam",
                     )
                 )
 
-        logger.info("CryptoScamDB: fetched %d addresses", len(all_addresses))
+        logger.info("ScamDB: fetched %d addresses", len(all_addresses))
         return all_addresses
 
+
+# ---------------------------------------------------------------------------
+# Ethereum-lists phishing lists
+# ---------------------------------------------------------------------------
 
 class EthereumListsScraper:
     """Scrapes ethereum-lists GitHub for phishing/scam address blacklists."""
@@ -99,9 +198,8 @@ class EthereumListsScraper:
 
         for url in self.REPOS:
             try:
-                raw = _fetch_url(url)
-                data = json.loads(raw)
-            except (urllib.error.URLError, json.JSONDecodeError, OSError) as e:
+                data = cached_fetch(url, max_age_hours=12)
+            except Exception as e:
                 logger.warning("EthereumLists fetch failed for %s: %s", url, e)
                 continue
 
@@ -132,6 +230,10 @@ class EthereumListsScraper:
         return all_addresses
 
 
+# ---------------------------------------------------------------------------
+# OFAC / OpenSanctions
+# ---------------------------------------------------------------------------
+
 class OFACScraper:
     """Scrapes OFAC/US Treasury sanctions list for sanctioned crypto addresses."""
 
@@ -142,30 +244,34 @@ class OFACScraper:
         now = datetime.now(timezone.utc).isoformat()
 
         try:
-            raw = _fetch_url(f"{self.BASE_URL}/targets.simple.csv", timeout=60)
-        except (urllib.error.URLError, OSError) as e:
+            raw = cached_fetch(f"{self.BASE_URL}/targets.simple.csv", max_age_hours=6, timeout=60)
+        except Exception as e:
             logger.warning("OFAC CSV fetch failed: %s", e)
             return all_addresses
 
-        lines = raw.strip().split("\n")
-        if not lines:
+        if not isinstance(raw, str):
+            raw = str(raw)
+
+        reader = csv.reader(io.StringIO(raw))
+        rows = list(reader)
+        if not rows:
             return all_addresses
 
-        header = lines[0].split(",")
-        try:
-            addr_idx = header.index("properties.currencyAddress")
-        except ValueError:
-            try:
-                addr_idx = header.index("cryptoCurrencyAddress")
-            except ValueError:
-                logger.warning("OFAC CSV: no address column found")
-                return all_addresses
+        header = rows[0]
+        addr_idx = None
+        for candidate in ("properties.currencyAddress", "cryptoCurrencyAddress"):
+            if candidate in header:
+                addr_idx = header.index(candidate)
+                break
 
-        for line in lines[1:]:
-            cols = line.split(",")
+        if addr_idx is None:
+            logger.warning("OFAC CSV: no address column found in %s", header[:10])
+            return all_addresses
+
+        for cols in rows[1:]:
             if addr_idx >= len(cols):
                 continue
-            addr = cols[addr_idx].strip().strip('"')
+            addr = cols[addr_idx].strip()
             if not addr or not addr.startswith("0x"):
                 continue
             all_addresses.append(
@@ -182,10 +288,14 @@ class OFACScraper:
         return all_addresses
 
 
+# ---------------------------------------------------------------------------
+# External Label Store
+# ---------------------------------------------------------------------------
+
 class ExternalLabelStore:
     """Manages the external labels database. Merges labels from multiple sources."""
 
-    PRIORITY = {"ofac": 3, "cryptoscamdb": 2, "ethereum-lists": 1}
+    PRIORITY = {"ofac": 3, "scamdb": 2, "ethereum-lists": 1}
 
     def __init__(self, storage_dir: Path | None = None):
         self._dir = storage_dir or DATA_DIR
@@ -248,16 +358,17 @@ class ExternalLabelStore:
         }
 
 
+# ---------------------------------------------------------------------------
+# Full scrape orchestrator
+# ---------------------------------------------------------------------------
+
 def run_full_scrape(max_pages: int = 3) -> pd.DataFrame:
     """Run all scrapers and save merged results."""
-    scrapers = [CryptoScamDBScraper(), OFACScraper(), EthereumListsScraper()]
+    scrapers = [ScamDBScraper(), OFACScraper(), EthereumListsScraper()]
     all_labels: list[LabeledAddress] = []
     for s in scrapers:
         try:
-            if isinstance(s, CryptoScamDBScraper):
-                labels = s.fetch(max_pages=max_pages)
-            else:
-                labels = s.fetch()
+            labels = s.fetch()
             logger.info("Fetched %d labels from %s", len(labels), type(s).__name__)
             all_labels.extend(labels)
         except Exception as e:

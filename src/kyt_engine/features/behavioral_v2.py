@@ -111,12 +111,12 @@ def _window_activity(addr_df: pd.DataFrame, step_from: int, step_to: int) -> dic
     else:
         f["dow_entropy"] = 0.0
 
-    froms = w["from_address"].values.astype(int) if len(w) > 0 else np.array([], dtype=int)
-    tos = w["to_address"].values.astype(int) if len(w) > 0 else np.array([], dtype=int)
-    addr_val = int(w["from_address"].iloc[0]) if len(w) > 0 else 0
+    froms = w["from_address"].astype(str).values if len(w) > 0 else np.array([], dtype=str)
+    tos = w["to_address"].astype(str).values if len(w) > 0 else np.array([], dtype=str)
+    addr_val = str(w["from_address"].iloc[0]) if len(w) > 0 else ""
 
-    in_counterparties = np.unique(tos[tos != addr_val]) if len(tos) > 0 else np.array([], dtype=int)
-    out_counterparties = np.unique(froms[froms != addr_val]) if len(froms) > 0 else np.array([], dtype=int)
+    in_counterparties = np.unique(tos[tos != addr_val]) if len(tos) > 0 else np.array([], dtype=str)
+    out_counterparties = np.unique(froms[froms != addr_val]) if len(froms) > 0 else np.array([], dtype=str)
     unique_in = len(in_counterparties)
     unique_out = len(out_counterparties)
     f["unique_in"] = safe_float(unique_in)
@@ -174,7 +174,7 @@ def compute_behavioral_features(df: pd.DataFrame) -> pd.DataFrame:
 
     addr_groups = df.groupby("from_address")
     all_features: list[dict[str, float]] = []
-    addresses: list[int] = []
+    addresses: list[str] = []
 
     for addr, addr_df in addr_groups:
         addr_df = addr_df.sort_values("time_step")

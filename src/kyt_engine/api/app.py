@@ -9,11 +9,13 @@ from pydantic import BaseModel
 
 from kyt_engine.features.engine import FeatureEngineer
 from kyt_engine.models.ensemble import StackingEnsemble
+from kyt_engine.models.unified_scorer import UnifiedScorer
 
 app = FastAPI(title="KYT Engine API", version="0.1.0")
 
 _models: dict[str, Any] = {}
 _feature_engineer: FeatureEngineer | None = None
+_unified_scorer: UnifiedScorer | None = None
 
 
 class Transaction(BaseModel):
@@ -64,6 +66,11 @@ def load_model(name: str, model: Any) -> None:
 def set_feature_engineer(fe: FeatureEngineer) -> None:
     global _feature_engineer
     _feature_engineer = fe
+
+
+def set_unified_scorer(scorer: UnifiedScorer) -> None:
+    global _unified_scorer
+    _unified_scorer = scorer
 
 
 def get_models() -> dict[str, Any]:
@@ -170,3 +177,36 @@ def batch_predict(request: PredictRequest) -> BatchPredictResponse:
         ))
 
     return BatchPredictResponse(results=results)
+
+
+class AnalyzeRequest(BaseModel):
+    lgbm_proba: float
+    k_score: float
+    vae_anomaly: float
+    triage_level: str = "priority"
+    reasons: list[str] | None = None
+
+
+@app.post("/analyze", response_model=dict)
+def analyze_transaction(request: AnalyzeRequest) -> dict:
+    """Full analysis: risk score + K-Score + triage + reasons."""
+    if _unified_scorer is None:
+        raise HTTPException(status_code=503, detail="UnifiedScorer not configured")
+
+    assessment = _unified_scorer.score(
+        lgbm_proba=request.lgbm_proba,
+        k_score=request.k_score,
+        vae_anomaly=request.vae_anomaly,
+        triage_level=request.triage_level,
+        reasons=request.reasons,
+    )
+
+    return {
+        "risk_score": assessment.risk_score,
+        "k_score": assessment.k_score,
+        "lgbm_proba": assessment.lgbm_proba,
+        "vae_anomaly": assessment.vae_anomaly,
+        "triage_level": assessment.triage_level,
+        "top_reasons": assessment.top_reasons,
+        "risk_zone": assessment.risk_zone,
+    }

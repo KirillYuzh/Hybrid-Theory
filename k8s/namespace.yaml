@@ -1,0 +1,7 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: kyt-engine
+  labels:
+    app.kubernetes.io/name: kyt-engine
+    app.kubernetes.io/part-of: kyt

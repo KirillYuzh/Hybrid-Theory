@@ -28,6 +28,9 @@ dependencies = [
     "pyarrow",
     "optuna",
     "node2vec",
+    "pyiceberg",
+    "duckdb",
+    "duckdb-engine",
 ]
 
 [project.optional-dependencies]
