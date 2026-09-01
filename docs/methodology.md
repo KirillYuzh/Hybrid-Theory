@@ -6,7 +6,7 @@
 
 ## 1. Конвейер инженерии признаков
 
-Конвейер инженерии признаков преобразует сырые записи о Bitcoin-транзакциях в 191 числовой признак, пригодный для классификации методами машинного обучения. Конвейер реализован в `src/kyt_engine/features/` и состоит из двух этапов: базовые статистические признаки (165) и поведенческие признаки (26).
+Конвейер инженерии признаков преобразует сырые записи о Bitcoin-транзакциях в 191 числовой признак, пригодный для классификации методами машинного обучения. Конвейер реализован в `src/kyt_engine/features/` и состоит из двух этапов: базовые статистические признаки (165) и поведенческие признаки (26). В production-версии дополнительно вычисляются 4 графовых признака и 64-мерные Node2Vec эмбеддинги, что даёт 196 + 64-d = 260-мерный вектор (см. §6).
 
 ### 1.1 Предобработка данных
 
@@ -145,11 +145,11 @@
 | Признак | Описание |
 |---------|-------------|
 | `value_trend_slope` | Наклон линейной регрессии |
-| `value_trend_r2$ | $R^2$ линейной аппроксимации |
+| `value_trend_r2` | $R^2$ линейной аппроксимации |
 | `value_momentum_{3,5,10}` | $\bar{v}_{\text{last } k} - \bar{v}_{\text{rest}}$ |
 | `value_acceleration` | Средняя разность второго порядка |
 | `value_jerk` | Средняя разность третьего порядка |
-| `value_volatility_{3,5,10}$ | Скользящее.std по окну $k$ |
+| `value_volatility_{3,5,10}` | Скользящее.std по окну $k$ |
 | `trend_consistency` | $\sigma_{\text{rolling-3}} / \mu_{\text{rolling-3}}$ |
 | `value_max_streak` | Наибольшая монотонная последовательность / $n$ |
 
@@ -299,7 +299,7 @@ Autoencoder (автоэнкодер) — это симметричная пол�
 ```
 Вход (d=191) → Linear(d, enc_dim) → ReLU → Linear(enc_dim, 32) → ReLU
                                                           ↓
-                                               Узкое горлышко (32 изм.)
+                                                Узкое горлышко (32 изм.)
                                                           ↓
 32 → Linear(32, enc_dim) → ReLU → Linear(enc_dim, d) → Выход (d=191)
 ```
@@ -337,12 +337,12 @@ $$z = \mu + \epsilon \cdot \sigma, \quad \epsilon \sim \mathcal{N}(0, I)$$
 
 ```
 Вход (d) → Enc(d, enc_dim) → ReLU → Enc(enc_dim, enc_dim//2) → ReLU
-                                                               ↓
-                                                     μ: Linear(enc//2, 16)
-                                                     logσ²: Linear(enc//2, 16)
-                                                               ↓
-                                               z ~ N(μ, σ²I) [репараметризация]
-                                                               ↓
+                                                                ↓
+                                                      μ: Linear(enc//2, 16)
+                                                      logσ²: Linear(enc//2, 16)
+                                                                ↓
+                                                z ~ N(μ, σ²I) [репараметризация]
+                                                                ↓
 Dec(16, enc//2) → ReLU → Dec(enc//2, enc_dim) → ReLU → Dec(enc_dim, d)
 ```
 
@@ -380,13 +380,406 @@ $$P(y=1|x) = \sigma\left(\beta_0 + \beta_1 p_{\text{LGBM}} + \beta_2 p_{\text{AE
 
 ---
 
-## 6. Конвейер обучения
+## 6. Распределённая инженерия признаков (Spark)
 
-### 6.1 Обоснование временной валидации
+В production-версии вычисление признаков выполняется распределённо через Spark Structured Streaming на Iceberg-таблицах. Каждый экстрактор реализует Spark-совместимый интерфейс `transform(df) -> df`.
+
+### 6.1 StatFeatureExtractor (Spark Streaming)
+
+**Контракт:** принимает `DataFrame` из Kafka-топика `raw_txs`, возвращает DataFrame с 166 статистическими признаками (см. §1.2.1–1.2.12). Аггрегирует по `(from_address, to_address)` с окном 30 дней.
+
+**Метод:** `df.withColumns({f"stat_feat_{i}": ... for i in range(1, 167)})`. Обрабатывает edge cases: `null → 0`, `inf → 0`, пустые группы → вектор нулей.
+
+### 6.2 BehaviorFeatureExtractor (Spark Batch)
+
+**Контракт:** принимает DataFrame из Iceberg-таблицы `features` (последние 90 дней), возвращает DataFrame с 26 поведенческими признаками на адрес.
+
+**Окна:** 30d, 60d, 90d. Поведенческие фичи требуют длинной истории и поэтому вычисляются в batch-режиме ежечасно.
+
+**Метод:** `compute_behavioral(df) -> df` с `behavior_feat_1...26` (см. §1.3).
+
+### 6.3 GraphFeatureExtractor (Spark Batch)
+
+**Контракт:** принимает рёбра из `raw_txs` за последние 30 дней, возвращает 4 графовых признака на адрес.
+
+**Алгоритмы:** PageRank (15 итераций, damping=0.85), in/out degree через `groupBy().count()`, triangle count через GraphFrame `triangleCount()`, clustering coefficient через `localClusteringCoefficient()`.
+
+### 6.4 EmbeddingGenerator (Spark Batch)
+
+**Контракт:** принимает GraphFrame рёбер, возвращает 64-мерные Node2Vec эмбеддинги.
+
+**Параметры:**
+- `walk_length = 40`
+- `num_walks = 10` на узел
+- `dimensions = 64`
+- `p = 1.0, q = 1.0` (баланс BFS/DFS)
+- `window = 10`
+- `epochs = 5`
+
+**Метод:** `train_node2vec(edges_df) -> df` с колонками `embedding_1...64`. Узлы вне графа получают нулевой вектор.
+
+### 6.5 SparkApplication (Kubernetes)
+
+```yaml
+executor:
+  instances: 10
+  cores: 4
+  memory: "8g"
+driver:
+  cores: 2
+  memory: "4g"
+sparkConf:
+  spark.sql.catalog.nessie.warehouse: "s3://kyt-lake/warehouse"
+  spark.sql.extensions: "org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions"
+```
+
+---
+
+## 7. K-Score (Anomaly Detection)
+
+**Файл:** `src/kyt_engine/models/kscore.py`
+
+K-Score — это unsupervised детектор аномалий, основанный на статистическом отклонении признаков текущей транзакции от baseline-распределения адреса. В отличие от supervised LightGBM, K-Score не требует меток и работает в реальном времени.
+
+### 7.1 Baseline-окна
+
+Для каждого адреса вычисляется baseline-распределение по 191 признаку на первых 6 временных шагах (~$t \leq 6$):
+
+$$\mu_{addr,f} = \frac{1}{|W|}\sum_{x \in W_{addr}} x_f, \quad \sigma_{addr,f} = \sqrt{\frac{1}{|W|}\sum_{x \in W_{addr}} (x_f - \mu_{addr,f})^2}$$
+
+где $W_{addr}$ — множество транзакций адреса в baseline-окне, $f$ — индекс признака.
+
+### 7.2 Z-Score
+
+Для каждой новой транзакции $x$ по каждому признаку $f$ вычисляется z-score:
+
+$$z_f(x) = \frac{x_f - \mu_{addr,f}}{\sigma_{addr,f} + \epsilon}$$
+
+$\epsilon = 10^{-8}$ предотвращает деление на ноль для адресов с константным baseline-признаком.
+
+### 7.3 K-Score агрегация
+
+K-Score = среднее абсолютных z-score по 191 признаку, нормированное в [0, 1]:
+
+$$k(x) = \min\left(\frac{1}{191}\sum_{f=1}^{191} |z_f(x)|, \; 1.0\right)$$
+
+Нормализация выполняется через эмпирический 99-й перцентиль, вычисленный на обучающей выборке.
+
+### 7.4 Зоны риска
+
+| Зона | Диапазон | Интерпретация |
+|------|----------|---------------|
+| GREEN | $k < 0.3$ | Поведение соответствует baseline-окну |
+| YELLOW | $0.3 \leq k \leq 0.7$ | Умеренное отклонение, требует внимания |
+| RED | $k > 0.7$ | Сильное отклонение, вероятная аномалия |
+
+### 7.5 Результаты на production-данных
+
+| Метрика | Значение |
+|---------|----------|
+| K-Score mean | 0.162 |
+| K-Score std | 0.084 |
+| GREEN (< 0.3) | 41,434 транзакций (88.8%) |
+| YELLOW (0.3–0.7) | 4,987 транзакций (10.7%) |
+| RED (> 0.7) | 143 транзакций (0.3%) |
+| Корреляция с label | 0.41 |
+
+---
+
+## 8. Triage System
+
+**Файл:** `src/kyt_engine/models/triage.py`
+
+Triage — это risk-based decision tree, преобразующий выходы Unified Scorer в один из трёх уровней обработки кейса: автоматическое закрытие, приоритетный анализ или немедленная эскалация.
+
+### 8.1 Решающее дерево
+
+```
+IF    K-Score < 0.3 AND p_LGBM > 0.9   → AUTO_CLOSE
+ELIF  K-Score > 0.7 OR  entropy < 0.3   → ESCALATION
+ELSE                                    → PRIORITY
+```
+
+**Логика правил:**
+
+- **AUTO_CLOSE:** низкая аномальность (K-Score < 0.3) при высокой уверенности модели (LGBM > 0.9) — типичный паттерн нормального адреса, маркированного как illicit исторически
+- **ESCALATION:** либо экстремальный K-Score (> 0.7), либо низкая энтропия предсказания (< 0.3) — модель уверена и сигнал сильный, требует срочной проверки
+- **PRIORITY:** все остальные случаи — дефолтный режим, попадает в очередь аналитика
+
+### 8.2 Распределение на production-данных
+
+| Уровень | Процент | Описание |
+|-----------|---------|----------|
+| AUTO_CLOSE | 0.0% | low risk, высокая уверенность |
+| PRIORITY | 99.7% | средний риск, нужен анализ |
+| ESCALATION | 0.3% | высокий риск, срочная проверка |
+
+Дисбаланс в сторону PRIORITY отражает консервативную политику AML: только явные случаи автоматизируются, остальное передаётся людям.
+
+### 8.3 Метрики Triage
+
+Triage минимизирует ручную нагрузку на аналитиков, отфильтровывая заведомо чистые случаи (AUTO_CLOSE) и приоритизируя опасные (ESCALATION). В production метрики отслеживаются через Prometheus:
+
+```
+kyt_alerts_total{triage="AUTO_CLOSE|PRIORITY|ESCALATION"}
+```
+
+---
+
+## 9. Unified Scorer
+
+**Файл:** `src/kyt_engine/models/unified_scorer.py`
+
+Unified Scorer — production-компонент, объединяющий четыре сигнала (LightGBM, K-Score, VAE, External Labels) во взвешенный `risk_score ∈ [0, 1]` и присваивающий `risk_zone` и `triage_level`.
+
+### 9.1 Формула ансамбля
+
+$$P_{\text{risk}}(x) = 0.50 \cdot p_{\text{LGBM}}(x) + 0.20 \cdot k(x) + 0.15 \cdot \hat{s}_{\text{VAE}}(x) + 0.15 \cdot r_{\text{ext}}(x)$$
+
+| Компонент | Вес | Источник |
+|-----------|-----|----------|
+| LightGBM | 0.50 | $p_{\text{LGBM}}(x) \in [0,1]$ — supervised probability |
+| K-Score | 0.20 | $k(x) \in [0,1]$ — unsupervised anomaly magnitude |
+| VAE | 0.15 | $\hat{s}_{\text{VAE}}(x) \in [0,1]$ — reconstruction anomaly |
+| External | 0.15 | $r_{\text{ext}}(x) \in [0,1]$ — risk intelligence |
+
+### 9.2 Маппинг в risk_zone
+
+| Зона | Диапазон $P_{\text{risk}}$ | Действие |
+|------|-----------------------------|----------|
+| GREEN | $< 0.3$ | Обычная обработка, не подозрительная |
+| YELLOW | $0.3 \leq P < 0.7$ | Помечена для мониторинга |
+| RED | $\geq 0.7$ | Требует немедленного внимания |
+
+### 9.3 Маппинг в triage_level
+
+`triage_level` вычисляется отдельным decision tree (см. §8) и принимает значения: `AUTO_CLOSE`, `PRIORITY`, `ESCALATION`.
+
+### 9.4 API-контракт
+
+**Вход (`ScoringRequest`):**
+
+```python
+{
+  "tx_id": str,
+  "from_address": str,
+  "to_address": str,
+  "value": float,
+  "gas_price": float,
+  "gas_used": int,
+  "timestamp": int,
+  "features": dict  # опционально f0-f164
+}
+```
+
+**Выход (`ScoringResponse`):**
+
+```python
+{
+  "tx_id": str,
+  "risk_score": float,        # ∈ [0, 1]
+  "risk_zone": str,           # "GREEN" | "YELLOW" | "RED"
+  "triage_level": str,        # "AUTO_CLOSE" | "PRIORITY" | "ESCALATION"
+  "lgbm_proba": float,
+  "k_score": float,
+  "vae_anomaly": float,
+  "external_risk": float,
+  "top_reasons": list[dict]   # SHAP top-3
+}
+```
+
+---
+
+## 10. Active Learning
+
+**Файл:** `src/kyt_engine/training/active_learning.py`
+
+Active Learning реализует human-in-the-loop стратегию маркировки для улучшения модели без полного переобучения. Аналитики маркируют только информативные сэмплы, выбранные через uncertainty sampling.
+
+### 10.1 Стратегия приоритизации
+
+Используется комбинация двух сигналов неопределённости: **энтропии предсказания** (supervised uncertainty) и **K-Score** (unsupervised anomaly).
+
+```
+HIGH:   entropy > 0.7 AND k_score > 0.5
+MEDIUM: entropy > 0.7 OR  k_score > 0.5
+LOW:    иначе
+```
+
+**Энтропия предсказания** вычисляется как:
+
+$$H(p) = -p \log_2 p - (1-p) \log_2 (1-p)$$
+
+где $p = p_{\text{LGBM}}(x)$. Высокая энтропия (близко к 1) означает, что модель не уверена в классе.
+
+**Комбинация с K-Score** позволяет находить сэмплы, которые одновременно (a) неоднозначны для supervised-модели и (b) статистически аномальны — это наиболее информативные точки для обучения.
+
+### 10.2 Распределение приоритетов
+
+| Приоритет | Количество | Доля | Действие |
+|-----------|------------|------|----------|
+| HIGH | 0 | 0.0% | Немедленная маркировка senior-аналитиком |
+| MEDIUM | 145 | 29.0% | Маркировка в течение 24 часов |
+| LOW | 355 | 71.0% | Бэклог, маркировка при наличии ресурсов |
+| **Итого** | **500** | **100.0%** | — |
+
+### 10.3 FeedbackLoop
+
+После маркировки аналитиком сэмплы поступают в `FeedbackLoop.incremental_retrain(existing_model, new_labels_df)`:
+
+```python
+def incremental_retrain(existing_model, new_labels_df) -> dict:
+    """
+    Returns updated model with init_model=existing_model.
+    Continues training on the augmented dataset without
+    full retraining from scratch.
+    """
+```
+
+Механизм `init_model=existing_model` (LightGBM `init_model` параметр) позволяет дообучать модель на новых данных с сохранением ранее выученных паттернов. Это критически важно для production, где полное переобучение занимает часы, а инкрементальное — минуты.
+
+### 10.4 Цикл обратной связи
+
+```
+UncertaintySampler → SelectedSample.priority
+       ↓
+Analyst Labeling (Streamlit UI)
+       ↓
+FeedbackLoop.incremental_retrain()
+       ↓
+ModelRegistry (Iceberg) → новый snapshot
+       ↓
+ModelLoader hot-reload в FastAPI
+```
+
+---
+
+## 11. External Labels (OFAC, GoPlus, ScamDB)
+
+**Файл:** `src/kyt_engine/data/scraper.py`
+
+Внешние источники риска дополняют supervised-сигнал, предоставляя ground-truth информацию об адресах из внешних баз.
+
+### 11.1 Источники
+
+| Источник | Тип | Частота обновления | Покрытие |
+|----------|-----|---------------------|----------|
+| OFAC SDN | Санкционные списки | Ежедневно | Глобальное, ~13k адресов |
+| GoPlus Security | Токен-секьюрити | Real-time | EVM-токены, honeypot-детекция |
+| ScamDB / Chainabuse | Fraud reports | Real-time | Мошеннические адреса по репортам |
+
+### 11.2 ExternalLabelStore
+
+Класс `ExternalLabelStore` обеспечивает:
+
+- **Confidence scoring:** каждый лейбл имеет оценку достоверности $\in [0, 1]$
+- **Source attribution:** указание источника для аудита и регуляторных требований
+- **TTL-кэширование:** 24 часа, чтобы избежать повторных API-вызовов
+- **Batch-обновления:** инкрементальная индексация новых лейблов
+- **Iceberg-схема:** `address (PK), label, source, confidence, timestamp, metadata (JSON)`
+
+### 11.3 Интеграция с Unified Scorer
+
+External risk вычисляется как максимум confidence по всем источникам для данного адреса:
+
+$$r_{\text{ext}}(x) = \max_{\text{source}} \text{confidence}_{\text{source}}(\text{from}(x)) \cup \text{confidence}_{\text{source}}(\text{to}(x))$$
+
+Если адрес не найден ни в одном источнике, $r_{\text{ext}}(x) = 0$.
+
+---
+
+## 12. Kafka + Flink Streaming Ingestion
+
+**Файлы:** `src/kyt_engine/ingestion/kafka_producer.py`, `flink_job.py`
+
+Real-time pipeline обеспечивает приём блокчейн-транзакций с минимальной задержкой и exactly-once гарантиями.
+
+### 12.1 Архитектура потока
+
+```
+RPC Node → Avro encode → Kafka (raw_txs) → Flink SQL → Iceberg (features)
+```
+
+### 12.2 Avro-схема транзакции
+
+```json
+{
+  "type": "record",
+  "name": "RawTransaction",
+  "fields": [
+    {"name": "tx_id",         "type": "string"},
+    {"name": "block_height",  "type": "long"},
+    {"name": "timestamp",     "type": "long"},
+    {"name": "from_address",  "type": "string"},
+    {"name": "to_address",    "type": "string"},
+    {"name": "value",         "type": "double"},
+    {"name": "gas_price",     "type": "double"},
+    {"name": "gas_used",      "type": "long"},
+    {"name": "input_data",    "type": "bytes"},
+    {"name": "ingestion_ts",  "type": "long"}
+  ]
+}
+```
+
+### 12.3 Flink-конфигурация
+
+- **Checkpointing:** ровно каждые 60 секунд, RocksDB state backend
+- **Watermark strategy:** по `ingestion_ts` с допуском out-of-orderness 5 секунд
+- **Window aggregation:** tumbling windows по адресам, 30-дневный горизонт
+- **Sink:** Iceberg `features` table, partitioned by `days(timestamp)`
+
+### 12.4 Exactly-once гарантии
+
+Flink использует two-phase commit (2PC) с Kafka как источник и Iceberg как приёмник. Это гарантирует, что каждая транзакция записывается в `features` ровно один раз, даже при сбоях.
+
+---
+
+## 13. Iceberg Model Registry
+
+**Файл:** `src/kyt_engine/data/iceberg_store.py`
+
+Iceberg-таблица `models` обеспечивает версионированное хранение моделей с полной аудит-трассой.
+
+### 13.1 Схема
+
+```
+model_id (PK): string
+model_type: string         // "lightgbm" | "vae" | "ensemble"
+version: string
+metrics: string            // JSON: {auc_roc, f1, precision, recall, ...}
+artifact_path: string      // S3 path к .pkl файлу
+trained_at: timestamp
+training_data_snapshot: string  // Iceberg snapshot-ID features table
+metadata: string           // JSON: гиперпараметры, конфигурация
+```
+
+### 13.2 Возможности
+
+- **Time-travel queries:** загрузка модели по `training_data_snapshot` для воспроизводимости экспериментов
+- **Schema evolution:** добавление новых метрик (например, `calibration_error`) без миграции
+- **ACID-транзакции:** атомарный promote в production — невозможно случайно подключить половину новой версии
+- **Side-by-side comparison:** параллельный запуск нескольких версий через `ModelLoader(version=...)`
+- **Snapshot lineage:** каждая запись `predictions` ссылается на конкретный `model_id`, обеспечивая полный аудит
+
+### 13.3 Интеграция с MLflow
+
+MLflow используется для трекинга экспериментов (гиперпараметры, метрики, артефакты), а Iceberg — для production-реестра. Двухуровневая архитектура:
+
+```
+MLflow Tracking (experiments) ── promote ──→ Iceberg models (production)
+```
+
+При promote в Iceberg автоматически публикуется webhook для Kubernetes-деплоймента, который обновляет ConfigMap `MODEL_VERSION` и триггерит rolling restart FastAPI-подов.
+
+---
+
+## 14. Конвейер обучения
+
+### 14.1 Обоснование временной валидации
 
 Стандартное стратифицированное разбиение 80/20 (`random_state=42`) используется как основная стратегия валидации. Однако для промышленного развёртывания рекомендуется временная валидация из-за события закрытия Dark Market на временном шаге 45 [15]. Временное разбиение обучает на временных шагах 1–44 и оценивает на шагах 45–49, имитируя реальное развёртывание, где модели должны обобщаться на ненаблюдённые будущие периоды.
 
-### 6.2 Процедура псевдо-разметки
+### 14.2 Процедура псевдо-разметки
 
 ```
 Вход: Базовая модель M, признаки X, метки y, порог достоверности τ = 0.95
@@ -406,7 +799,7 @@ $$P(y=1|x) = \sigma\left(\beta_0 + \beta_1 p_{\text{LGBM}} + \beta_2 p_{\text{AE
 4. Переобучение M на (X_aug, y_aug)
 ```
 
-### 6.3 Генерация эмбеддингов Node2Vec
+### 14.3 Генерация эмбеддингов Node2Vec
 
 Когда требуются графовые эмбеддинги, конвейер выполняет:
 
@@ -419,16 +812,19 @@ $$P(y=1|x) = \sigma\left(\beta_0 + \beta_1 p_{\text{LGBM}} + \beta_2 p_{\text{AE
 
 ---
 
-## 7. Сохранение моделей
+## 15. Сохранение моделей
 
-Обученные модели сериализуются как pickle-файлы в директории `models/`:
+Обученные модели сериализуются как pickle-файлы в директории `models/` и регистрируются в Iceberg `models` table:
 
 ```
 models/
 ├── lightgbm.pkl          # Экземпляр LightGBMClassifier
 ├── autoencoder.pkl       # Экземпляр AutoencoderDetector
 ├── ensemble.pkl          # Экземпляр StackingEnsemble
+├── kscore.pkl            # Экземпляр KScoreDetector
+├── triage.pkl            # Параметры decision tree
+├── unified_scorer.pkl    # Ансамбль с весами
 └── top20_feature_importance.csv  # Рейтинг важности признаков
 ```
 
-Все модели поддерживают `predict_proba(X)`, возвращающий массив $(n, 2)$ с $[P(\text{legit}), P(\text{n illegit})]$, и `predict(X)`, возвращающий бинарные метки.
+Все модели поддерживают `predict_proba(X)`, возвращающий массив $(n, 2)$ с $[P(\text{legit}), P(\text{illicit})]$, и `predict(X)`, возвращающий бинарные метки. KScore возвращает скалярный anomaly score ∈ [0, 1], UnifiedScorer возвращает `ScoringResponse` (см. §9.4).
