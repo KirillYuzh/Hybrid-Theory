@@ -7,7 +7,7 @@ name = "kyt-engine"
 version = "0.1.0"
 description = "KYT Engine — движок для анализа и предсказания"
 readme = "README.md"
-license = "MIT"
+license = "GNU Affero General Public License"
 requires-python = ">=3.10"
 dependencies = [
     "pandas",
@@ -27,6 +27,7 @@ dependencies = [
     "dask",
     "pyarrow",
     "optuna",
+    "node2vec",
 ]
 
 [project.optional-dependencies]

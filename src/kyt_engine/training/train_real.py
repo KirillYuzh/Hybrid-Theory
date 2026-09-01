@@ -5,11 +5,18 @@ import pickle
 import time
 from pathlib import Path
 
-import mlflow
 import numpy as np
 import pandas as pd
 from sklearn.isotonic import IsotonicRegression
-from sklearn.model_selection import train_test_split
+from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import (
+    average_precision_score,
+    classification_report as sklearn_report,
+    f1_score,
+    precision_score,
+    recall_score,
+    roc_auc_score,
+)
 
 from kyt_engine.features._utils import find_best_threshold, prepare_features
 
@@ -85,18 +92,15 @@ def build_temporal_features(features: pd.DataFrame) -> pd.DataFrame:
 def train_lightgbm(
     X_train: pd.DataFrame, y_train: pd.Series,
     X_test: pd.DataFrame, y_test: pd.Series,
+    n_estimators: int = 800,
 ) -> dict:
     from lightgbm import LGBMClassifier
-    from sklearn.metrics import (
-        average_precision_score, classification_report as sklearn_report,
-        f1_score, precision_score, recall_score, roc_auc_score,
-    )
 
     logger.info("Training LightGBM on %d samples", len(X_train))
     t0 = time.time()
 
     model = LGBMClassifier(
-        n_estimators=800,
+        n_estimators=n_estimators,
         learning_rate=0.05,
         num_leaves=127,
         max_depth=-1,
@@ -108,7 +112,7 @@ def train_lightgbm(
         class_weight="balanced",
         random_state=42,
         verbose=-1,
-        n_jobs=-1,
+        n_jobs=1,
     )
 
     model.fit(X_train, y_train)
@@ -143,10 +147,6 @@ def train_autoencoder(
     X_test: pd.DataFrame, y_test: pd.Series,
 ) -> dict:
     from kyt_engine.models.autoencoder import AutoencoderDetector
-    from sklearn.metrics import (
-        average_precision_score, classification_report as sklearn_report,
-        f1_score, precision_score, recall_score, roc_auc_score,
-    )
 
     logger.info("Training Autoencoder on %d samples", len(X_train))
     t0 = time.time()
@@ -183,29 +183,24 @@ def train_autoencoder(
 
 def train_ensemble(
     lgbm_result: dict, ae_result: dict,
-    X_train: pd.DataFrame, y_train: pd.Series,
-    X_test: pd.DataFrame, y_test: pd.Series,
+    X_val: pd.DataFrame, y_val: np.ndarray,
+    X_test: pd.DataFrame, y_test: np.ndarray,
 ) -> dict:
-    from sklearn.linear_model import LogisticRegression
-    from sklearn.metrics import (
-        average_precision_score, classification_report as sklearn_report,
-        f1_score, precision_score, recall_score, roc_auc_score,
-    )
 
-    logger.info("Training Stacking Ensemble")
+    logger.info("Training Stacking Ensemble (meta on val, eval on test)")
     t0 = time.time()
 
-    lgbm_proba_train = lgbm_result["model"].predict_proba(X_train)[:, 1]
-    ae_proba_train = ae_result["model"].predict_proba(X_train)[:, 1]
+    lgbm_proba_val = lgbm_result["model"].predict_proba(X_val)[:, 1]
+    ae_proba_val = ae_result["model"].predict_proba(X_val)[:, 1]
 
-    lgbm_proba_test = lgbm_result["proba"]
-    ae_proba_test = ae_result["proba"]
+    lgbm_proba_test = lgbm_result["model"].predict_proba(X_test)[:, 1]
+    ae_proba_test = ae_result["model"].predict_proba(X_test)[:, 1]
 
-    meta_X_train = np.column_stack([lgbm_proba_train, ae_proba_train])
+    meta_X_val = np.column_stack([lgbm_proba_val, ae_proba_val])
     meta_X_test = np.column_stack([lgbm_proba_test, ae_proba_test])
 
     meta = LogisticRegression(max_iter=1000, random_state=42, class_weight="balanced")
-    meta.fit(meta_X_train, y_train)
+    meta.fit(meta_X_val, y_val)
 
     proba = meta.predict_proba(meta_X_test)[:, 1]
     threshold = find_best_threshold(proba, y_test)
@@ -229,7 +224,6 @@ def train_ensemble(
 
 
 def save_model(model: object, name: str) -> Path:
-    MODELS_DIR.mkdir(parents=True, exist_ok=True)
     path = MODELS_DIR / f"{name}.pkl"
     with open(path, "wb") as f:
         pickle.dump(model, f)
@@ -237,64 +231,139 @@ def save_model(model: object, name: str) -> Path:
     return path
 
 
+def temporal_split(
+    features: pd.DataFrame, label_map: dict[int, int],
+    train_end: int = 36, val_end: int = 44,
+) -> dict:
+    features = features.copy()
+    features["label"] = features["txId"].map(label_map)
+    features = features.dropna(subset=["label"])
+
+    train_mask = features["time_step"] <= train_end
+    val_mask = (features["time_step"] > train_end) & (features["time_step"] <= val_end)
+    test_mask = features["time_step"] > val_end
+
+    feature_cols = [c for c in features.columns if c not in ("txId", "label", "time_step")]
+
+    result = {}
+    for split_name, mask in [("train", train_mask), ("val", val_mask), ("test", test_mask)]:
+        df = features[mask]
+        X = df[feature_cols].replace([np.inf, -np.inf], np.nan).fillna(0.0)
+        y = df["label"].values.astype(int)
+        result[f"X_{split_name}"] = X
+        result[f"y_{split_name}"] = y
+
+    result["feature_cols"] = feature_cols
+    return result
+
+
+def drift_analysis(
+    lgbm_model, ae_model, meta_model,
+    features: pd.DataFrame, label_map: dict[int, int], feature_cols: list[str],
+    threshold: float = 0.5,
+) -> dict[int, dict[str, float]]:
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    features = features.copy()
+    features["label"] = features["txId"].map(label_map)
+    features = features.dropna(subset=["label"])
+
+    results: dict[int, dict[str, float]] = {}
+    for step in sorted(features["time_step"].unique()):
+        mask = features["time_step"] == step
+        df = features[mask]
+        if len(df) < 10:
+            continue
+        X = df[feature_cols].replace([np.inf, -np.inf], np.nan).fillna(0.0)
+        y = df["label"].values.astype(int)
+
+        if len(np.unique(y)) < 2:
+            logger.warning("time_step %d: fewer than 2 classes, skipping", step)
+            continue
+
+        lgbm_proba = lgbm_model.predict_proba(X)[:, 1]
+        ae_proba = ae_model.predict_proba(X)[:, 1]
+        meta_X = np.column_stack([lgbm_proba, ae_proba])
+        proba = meta_model.predict_proba(meta_X)[:, 1]
+        pred = (proba >= threshold).astype(int)
+
+        results[int(step)] = {
+            "f1": float(f1_score(y, pred, zero_division=0)),
+            "auc_roc": float(roc_auc_score(y, proba)),
+            "precision": float(precision_score(y, pred, zero_division=0)),
+            "recall": float(recall_score(y, pred, zero_division=0)),
+            "n_samples": int(mask.sum()),
+        }
+
+    reports_dir = ROOT / "reports"
+    reports_dir.mkdir(parents=True, exist_ok=True)
+
+    if results:
+        steps = sorted(results.keys())
+        fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+        fig.suptitle("Drift Analysis per Time Step", fontsize=14)
+        for ax, metric in zip(axes.flat, ["f1", "auc_roc", "precision", "recall"]):
+            vals = [results[s][metric] for s in steps]
+            ax.plot(steps, vals, marker="o", linewidth=1.5)
+            ax.set_title(metric)
+            ax.set_xlabel("time_step")
+            ax.set_ylabel(metric)
+            ax.set_ylim(0, 1.05)
+            ax.grid(True, alpha=0.3)
+        plt.tight_layout()
+        plt.savefig(reports_dir / "drift_analysis.png", dpi=150)
+        plt.close(fig)
+        logger.info("Drift plot saved to %s", reports_dir / "drift_analysis.png")
+
+    return results
+
+
 def run_training() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
     MODELS_DIR.mkdir(parents=True, exist_ok=True)
-    mlflow.set_experiment("kyt_engine_real_elliptic")
 
-    with mlflow.start_run(run_name="real_elliptic_full"):
-        features, label_map, edges = load_elliptic_data()
+    features, label_map, edges = load_elliptic_data()
 
-        graph_feats = build_graph_features(features, edges)
-        temporal_feats = build_temporal_features(features)
+    graph_feats = build_graph_features(features, edges)
+    temporal_feats = build_temporal_features(features)
 
-        features = features.merge(graph_feats, on="txId", how="left")
-        features = features.merge(temporal_feats, on="txId", how="left")
+    features = features.merge(graph_feats, on="txId", how="left")
+    features = features.merge(temporal_feats, on="txId", how="left")
 
-        features["label"] = features["txId"].map(label_map)
-        features = features.dropna(subset=["label"])
-        features["label"] = features["label"].astype(int)
+    split = temporal_split(features, label_map, train_end=36, val_end=44)
 
-        y = features["label"].values
-        feature_cols = [c for c in features.columns if c not in ("txId", "label")]
-        X = features[feature_cols].copy()
-        X = X.replace([np.inf, -np.inf], np.nan).fillna(0.0)
+    X_train, y_train = split["X_train"], split["y_train"]
+    X_val, y_val = split["X_val"], split["y_val"]
+    X_test, y_test = split["X_test"], split["y_test"]
+    feature_cols = split["feature_cols"]
 
-        mlflow.log_param("n_total", len(X))
-        mlflow.log_param("n_labeled", len(y))
-        mlflow.log_param("n_features", X.shape[1])
-        mlflow.log_param("illicit_ratio", float(y.mean()))
+    lgbm_result = train_lightgbm(X_train, y_train, X_val, y_val)
+    save_model(lgbm_result["model"], "lightgbm_real")
 
-        X_train, X_test, y_train, y_test = train_test_split(
-            X, y, test_size=0.2, stratify=y, random_state=42,
+    ae_result = train_autoencoder(X_train, y_train, X_val, y_val)
+    save_model(ae_result["model"], "autoencoder_real")
+
+    ens_result = train_ensemble(lgbm_result, ae_result, X_val, y_val, X_test, y_test)
+    save_model(ens_result["model"], "ensemble_real")
+
+    logger.info("=" * 60)
+    logger.info("FINAL RESULTS (test set)")
+    logger.info("=" * 60)
+    for name, res in [("LightGBM", lgbm_result), ("Autoencoder", ae_result), ("Ensemble", ens_result)]:
+        logger.info("%s: %s", name, res["metrics"])
+
+    try:
+        drift = drift_analysis(
+            lgbm_result["model"], ae_result["model"], ens_result["model"],
+            features, label_map, feature_cols, threshold=ens_result["threshold"],
         )
-
-        mlflow.log_param("train_size", len(X_train))
-        mlflow.log_param("test_size", len(X_test))
-
-        MODELS_DIR.mkdir(parents=True, exist_ok=True)
-
-        lgbm_result = train_lightgbm(X_train, y_train, X_test, y_test)
-        save_model(lgbm_result["model"], "lightgbm_real")
-        for k, v in lgbm_result["metrics"].items():
-            mlflow.log_metric(f"lgbm_{k}", v)
-
-        ae_result = train_autoencoder(X_train, y_train, X_test, y_test)
-        save_model(ae_result["model"], "autoencoder_real")
-        for k, v in ae_result["metrics"].items():
-            mlflow.log_metric(f"ae_{k}", v)
-
-        ens_result = train_ensemble(lgbm_result, ae_result, X_train, y_train, X_test, y_test)
-        save_model(ens_result["model"], "ensemble_real")
-        for k, v in ens_result["metrics"].items():
-            mlflow.log_metric(f"ens_{k}", v)
-
-        logger.info("=" * 60)
-        logger.info("FINAL RESULTS")
-        logger.info("=" * 60)
-        for name, res in [("LightGBM", lgbm_result), ("Autoencoder", ae_result), ("Ensemble", ens_result)]:
-            logger.info("%s: %s", name, res["metrics"])
+        logger.info("Drift analysis: %d time steps evaluated", len(drift))
+    except Exception as exc:
+        logger.warning("Drift analysis failed: %s. Continuing without.", exc)
 
     logger.info("Training pipeline complete.")
 
