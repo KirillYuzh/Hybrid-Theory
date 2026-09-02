@@ -99,14 +99,48 @@ class GraphFeatureExtractor:
 
 class EmbeddingGenerator:
     def train_node2vec(self, edges_df: DataFrame) -> DataFrame:
+        try:
+            from pyspark.ml.feature import Word2Vec
+            from pyspark.sql import SparkSession
+        except ImportError as e:
+            raise ImportError(
+                "EmbeddingGenerator requires PySpark. Install with: pip install pyspark"
+            ) from e
+
         import pandas as pd
+        from pyspark.sql.functions import monotonically_increasing_id
+
         unique_nodes = pd.concat([edges_df.select('src').distinct().toPandas(),
                                   edges_df.select('dst').distinct().toPandas()]).drop_duplicates()
         node_list = unique_nodes['src'].tolist() + unique_nodes['dst'].tolist()
         node_list = list(set(node_list))
-        
-        embeddings = pd.DataFrame({'node': node_list})
-        for i in range(1, 65):
-            embeddings[f'embedding_{i}'] = np.random.randn(len(node_list))
-        
-        return None  # Would return Spark DataFrame in production
+
+        embeddings_df = pd.DataFrame({'node': node_list})
+
+        if len(embeddings_df) == 0:
+            spark = SparkSession.builder.getOrCreate()
+            return spark.createDataFrame(embeddings_df)
+
+        spark = SparkSession.builder.getOrCreate()
+
+        edges_spark = edges_df.withColumnRenamed('src', 'src_node')
+        edges_spark = edges_spark.withColumnRenamed('dst', 'dst_node')
+
+        word2vec = Word2Vec(
+            inputCol='src_node',
+            outputCol='embedding',
+            vectorSize=64,
+            maxIter=20,
+            seed=42
+        )
+
+        model = word2vec.fit(edges_spark)
+        result = model.transform(edges_spark)
+        result = result.select('dst_node', 'embedding')
+
+        embeddings_spark = spark.createDataFrame(embeddings_df)
+        embeddings_spark = embeddings_spark.join(result, on='dst_node', how='left')
+        embeddings_spark = embeddings_spark.fillna(0.0, subset=['embedding'])
+        embeddings_spark = embeddings_spark.withColumn('node', monotonically_increasing_id())
+
+        return embeddings_spark.select('node', 'embedding')

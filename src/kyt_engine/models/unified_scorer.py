@@ -58,6 +58,8 @@ class UnifiedScorer:
         lgbm_feat_cols = [c for c in features.columns if c.startswith('f') and c[1:].isdigit() and int(c[1:]) < 165]
         lgbm_feat_cols += ['in_degree', 'out_degree']
         lgbm_feat_cols = [c for c in lgbm_feat_cols if c in features.columns]
+        if not lgbm_feat_cols:
+            raise ValueError(f"No valid feature columns found in DataFrame. Available: {list(features.columns)[:10]}...")
         X_lgbm = features[lgbm_feat_cols].replace([np.inf, -np.inf], np.nan).fillna(0)
 
         lgbm_proba = self._lgbm.predict_proba(X_lgbm)[:, 1]
@@ -83,8 +85,8 @@ class UnifiedScorer:
             self._weights[3] * external_risk
         )
 
-        risk_zone = pd.cut(risk_score, bins=[0, 0.3, 0.7, 1.0], labels=['GREEN', 'YELLOW', 'RED'])
-        risk_zone_arr = risk_zone.astype(str).values
+        risk_zone = pd.cut(pd.Series(risk_score), bins=[0, 0.3, 0.7, 1.0], labels=['GREEN', 'YELLOW', 'RED'])
+        risk_zone_arr = risk_zone.astype(str).to_numpy()
 
         from kyt_engine.models.triage import TriageSystem
         tsys = TriageSystem()
@@ -95,7 +97,7 @@ class UnifiedScorer:
                 tx_id=int(tx_ids.iloc[i]),
                 risk_score=float(risk_score[i]),
                 risk_zone=risk_zone_arr[i],
-                triage_level=triage_result['priority'].iloc[i],
+                triage_level=triage_result.loc[i, 'priority'],
                 lgbm_proba=float(lgbm_proba[i]),
                 k_score=float(k_scores.iloc[i]),
                 vae_anomaly=float(vae_anomaly[i]),
