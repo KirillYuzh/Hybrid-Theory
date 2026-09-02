@@ -8,6 +8,8 @@ import joblib
 import numpy as np
 import pandas as pd
 
+from kyt_engine.models.lightgbm_model import LGBM_TRAIN_CONFIG
+
 logger = logging.getLogger(__name__)
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -131,21 +133,7 @@ class IncrementalTrainer:
         logger.info("Full retrain on %d samples", len(X_train))
         t0 = time.time()
 
-        model = LGBMClassifier(
-            n_estimators=800,
-            learning_rate=0.05,
-            num_leaves=127,
-            max_depth=-1,
-            min_child_samples=10,
-            subsample=0.8,
-            colsample_bytree=0.8,
-            reg_alpha=0.1,
-            reg_lambda=1.0,
-            class_weight="balanced",
-            random_state=42,
-            verbose=-1,
-            n_jobs=1,
-        )
+        model = LGBMClassifier(**LGBM_TRAIN_CONFIG)
         model.fit(X_train, y_train)
         elapsed = time.time() - t0
 

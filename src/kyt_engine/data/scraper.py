@@ -7,7 +7,6 @@ import json
 import logging
 import time
 import urllib.request
-import urllib.error
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -64,60 +63,6 @@ def cached_fetch(url: str, max_age_hours: int = 24, timeout: int = 30) -> dict |
             time.sleep(2 ** attempt)
 
     raise RuntimeError(f"Failed to fetch {url} after 3 attempts: {last_exc}")
-
-
-def _fetch_url(url: str, timeout: int = 30) -> str:
-    """Fetch raw text from *url* (no caching, for internal helpers)."""
-    req = urllib.request.Request(url, headers={"User-Agent": "kyt-engine/1.0"})
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        return resp.read().decode()
-
-
-# ---------------------------------------------------------------------------
-# GoPlus Token Security
-# ---------------------------------------------------------------------------
-
-class GoPlusChecker:
-    """Checks token security via GoPlus API.
-
-    Detects honeypots, high tax tokens, hidden mint, etc.
-    chain_id: 1=ETH, 56=BSC, 137=Polygon, etc.
-    """
-
-    BASE_URL = "https://api.gopluslabs.io/api/v1"
-
-    def check_token(self, contract_address: str, chain_id: int = 1) -> dict:
-        """Check a single token for security issues.
-
-        Returns a dict with keys like: is_honeypot, buy_tax, sell_tax,
-        cannot_sell_all, hidden_owner, is_open_source, etc.
-        """
-        url = f"{self.BASE_URL}/token_security/{chain_id}?contract_addresses={contract_address}"
-        data = cached_fetch(url, max_age_hours=1)
-
-        result_map = data.get("result", {})
-        # GoPlus returns addresses as keys; grab the first (only) entry
-        if isinstance(result_map, dict):
-            for _addr, info in result_map.items():
-                return info if isinstance(info, dict) else {}
-        return {}
-
-    def check_batch(self, addresses: list[str], chain_id: int = 1) -> list[dict]:
-        """Check multiple tokens (max 100 per request)."""
-        results: list[dict] = []
-        for chunk_start in range(0, len(addresses), 100):
-            chunk = addresses[chunk_start : chunk_start + 100]
-            joined = ",".join(chunk)
-            url = f"{self.BASE_URL}/token_security/{chain_id}?contract_addresses={joined}"
-            data = cached_fetch(url, max_age_hours=1)
-            result_map = data.get("result", {})
-            if isinstance(result_map, dict):
-                for addr in chunk:
-                    info = result_map.get(addr, {})
-                    results.append(info if isinstance(info, dict) else {})
-            else:
-                results.extend([{}] * len(chunk))
-        return results
 
 
 # ---------------------------------------------------------------------------
@@ -237,7 +182,7 @@ class EthereumListsScraper:
 class OFACScraper:
     """Scrapes OFAC/US Treasury sanctions list for sanctioned crypto addresses."""
 
-    BASE_URL = "https://data.opensanctions.org/datasets/latest/default"
+    BASE_URL = "https://www.opensanctions.org/datasets/default/"
 
     def fetch(self) -> list[LabeledAddress]:
         all_addresses: list[LabeledAddress] = []
@@ -395,9 +340,9 @@ class Scraper:
     """
 
     confidence_weights: dict[str, float] = {
-        "ofac": 1.0,
-        "cryptoscamdb": 0.7,
-        "github": 0.3,
+        "ofacscraper": 1.0,
+        "scamdbscraper": 0.7,
+        "ethereumlistsscraper": 0.3,
     }
 
     def __init__(self, sources: list | None = None):

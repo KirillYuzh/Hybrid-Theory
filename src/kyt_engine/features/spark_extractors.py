@@ -99,6 +99,11 @@ class GraphFeatureExtractor:
 
 class EmbeddingGenerator:
     def train_node2vec(self, edges_df: DataFrame) -> DataFrame:
+        """Generate node embeddings using Word2Vec (Node2Vec approximation).
+
+        Returns Spark DataFrame with node and embedding columns.
+        Raises ImportError if PySpark is not available.
+        """
         try:
             from pyspark.ml.feature import Word2Vec
             from pyspark.sql import SparkSession

@@ -23,9 +23,9 @@ def _reaction_speed_features(group: pd.DataFrame) -> dict[str, float]:
     for i in range(1, len(sorted_group)):
         prev = sorted_group.iloc[i - 1]
         curr = sorted_group.iloc[i]
-        if prev["from_address"] == address and curr["to_address"] == address:
-            reaction_times.append(curr["timestamp"] - prev["timestamp"])
-        elif prev["to_address"] == address and curr["from_address"] == address:
+        is_incoming = prev["from_address"] == address and curr["to_address"] == address
+        is_outgoing = prev["to_address"] == address and curr["from_address"] == address
+        if is_incoming or is_outgoing:
             reaction_times.append(curr["timestamp"] - prev["timestamp"])
 
     if len(reaction_times) > 0:
@@ -125,7 +125,6 @@ def _transaction_interval_features(group: pd.DataFrame) -> dict[str, float]:
             "long_pause_ratio": 0.0, "rapid_fire_ratio": 0.0,
         }
 
-    mean_int = np.mean(intervals)
     median_int = np.median(intervals)
 
     if median_int > 0:

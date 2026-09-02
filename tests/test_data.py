@@ -11,13 +11,13 @@ def test_validate_columns_pass():
 
 def test_validate_columns_fail():
     df = pd.DataFrame({"a": [1]})
-    with pytest.raises(ValueError, match="не содержит обязательные колонки"):
+    with pytest.raises(ValueError, match="is missing required columns"):
         validate_columns(df, ["a", "b", "c"], "test_source")
 
 
 def test_validate_columns_empty_df():
     df = pd.DataFrame()
-    with pytest.raises(ValueError, match="не содержит обязательные колонки"):
+    with pytest.raises(ValueError, match="is missing required columns"):
         validate_columns(df, ["col1"], "test")
 
 

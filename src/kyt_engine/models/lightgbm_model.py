@@ -7,6 +7,39 @@ from sklearn.isotonic import IsotonicRegression
 
 from kyt_engine.features._utils import find_best_threshold, prepare_features
 
+LGBM_CONFIG: dict[str, object] = {
+    "n_estimators": 500,
+    "learning_rate": 0.05,
+    "max_depth": -1,
+    "num_leaves": 63,
+    "min_child_samples": 20,
+    "subsample": 0.8,
+    "colsample_bytree": 0.8,
+    "reg_alpha": 0.1,
+    "reg_lambda": 1.0,
+    "class_weight": "balanced",
+    "random_state": 42,
+    "verbose": -1,
+    "n_jobs": 1,
+}
+
+# Production-конфиг для полного обучения (используется в training/*)
+LGBM_TRAIN_CONFIG: dict[str, object] = {
+    "n_estimators": 800,
+    "learning_rate": 0.05,
+    "num_leaves": 127,
+    "max_depth": -1,
+    "min_child_samples": 10,
+    "subsample": 0.8,
+    "colsample_bytree": 0.8,
+    "reg_alpha": 0.1,
+    "reg_lambda": 1.0,
+    "class_weight": "balanced",
+    "random_state": 42,
+    "verbose": -1,
+    "n_jobs": 1,
+}
+
 
 class LightGBMClassifier:
     def __init__(

@@ -20,6 +20,7 @@ from sklearn.metrics import (
 
 from kyt_engine.features._utils import find_best_threshold, prepare_features
 from kyt_engine.features.behavioral_v2 import compute_behavioral_features
+from kyt_engine.models.lightgbm_model import LGBM_TRAIN_CONFIG
 
 logger = logging.getLogger(__name__)
 
@@ -100,21 +101,8 @@ def train_lightgbm(
     logger.info("Training LightGBM on %d samples", len(X_train))
     t0 = time.time()
 
-    model = LGBMClassifier(
-        n_estimators=n_estimators,
-        learning_rate=0.05,
-        num_leaves=127,
-        max_depth=-1,
-        min_child_samples=10,
-        subsample=0.8,
-        colsample_bytree=0.8,
-        reg_alpha=0.1,
-        reg_lambda=1.0,
-        class_weight="balanced",
-        random_state=42,
-        verbose=-1,
-        n_jobs=1,
-    )
+    params = {**LGBM_TRAIN_CONFIG, "n_estimators": n_estimators}
+    model = LGBMClassifier(**params)
 
     model.fit(X_train, y_train)
     train_time = time.time() - t0

@@ -1,15 +1,12 @@
 from __future__ import annotations
+
 import numpy as np
 import pandas as pd
 from dataclasses import dataclass
-from typing import Optional
 
 
 @dataclass
 class ScoringResult:
-    """
-    Complete risk assessment for a transaction
-    """
     tx_id: int
     risk_score: float
     risk_zone: str
@@ -20,15 +17,10 @@ class ScoringResult:
     vae_anomaly: float
     external_risk: float
 
-    top_features: list[dict]
-
     timestamp: pd.Timestamp
 
 
 class UnifiedScorer:
-    """
-    Combines all risk signals into a unified score
-    """
 
     def __init__(
         self,
@@ -49,9 +41,6 @@ class UnifiedScorer:
         self._weights = self._weights / self._weights.sum()
 
     def score(self, features: pd.DataFrame, tx_ids: pd.Series) -> list[ScoringResult]:
-        """
-        Score a batch of transactions
-        """
         results = []
 
         # Use only the features LightGBM was trained on (165 f's + in_degree + out_degree = 167)
@@ -102,7 +91,6 @@ class UnifiedScorer:
                 k_score=float(k_scores.iloc[i]),
                 vae_anomaly=float(vae_anomaly[i]),
                 external_risk=float(external_risk[i]),
-                top_features=[],
                 timestamp=pd.Timestamp.now()
             ))
         return results

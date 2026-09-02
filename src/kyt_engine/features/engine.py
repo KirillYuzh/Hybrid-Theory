@@ -7,6 +7,7 @@ import pandas as pd
 from kyt_engine.features.base import extract_base_features
 from kyt_engine.features.behavioral import extract_behavioral_features
 
+# Подсчитано: base.py:_NUM_BASE_FEATURES + behavioral.py:_NUM_BEHAVIORAL_FEATURES
 _BASE_COUNT = 165
 _BEHAVIORAL_COUNT = 26
 _TOTAL_COUNT = _BASE_COUNT + _BEHAVIORAL_COUNT

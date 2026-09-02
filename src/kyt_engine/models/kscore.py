@@ -11,9 +11,7 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-# Вычисление K-Score для каждой транзакции (0=обычная, 1=крайне необычная)
-# Основа: deviation от behavioral baseline клиента (30/60/90 дней), а не глобальной популяции
-# Зависит от BehavioralV2 (блок 22) + поведенческого профилирования
+# Вычисление K-Score: deviation от behavioral baseline клиента (30/60/90 дней)
 # Файл: src/kyt_engine/models/kscore.py
 
 

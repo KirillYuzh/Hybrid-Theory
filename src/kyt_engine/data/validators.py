@@ -12,5 +12,5 @@ def validate_columns(df: pd.DataFrame, required: list[str], source: str) -> None
     missing = set(required) - set(df.columns)
     if missing:
         raise ValueError(
-            f"Источник «{source}» не содержит обязательные колонки: {sorted(missing)}"
+            f"Source '{source}' is missing required columns: {sorted(missing)}"
         )

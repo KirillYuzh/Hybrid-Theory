@@ -17,6 +17,7 @@ from kyt_engine.training.train_real import (
     load_elliptic_data,
 )
 from kyt_engine.features._utils import find_best_threshold, prepare_features
+from kyt_engine.models.lightgbm_model import LGBM_TRAIN_CONFIG
 
 logger = logging.getLogger(__name__)
 
@@ -87,21 +88,7 @@ def run_incremental_demo() -> None:
     df, feature_cols = _build_features(features, edges)
     logger.info("Feature matrix: %d rows, %d features", len(df), len(feature_cols))
 
-    lgbm_params = dict(
-        n_estimators=800,
-        learning_rate=0.05,
-        num_leaves=127,
-        max_depth=-1,
-        min_child_samples=10,
-        subsample=0.8,
-        colsample_bytree=0.8,
-        reg_alpha=0.1,
-        reg_lambda=1.0,
-        class_weight="balanced",
-        random_state=42,
-        verbose=-1,
-        n_jobs=-1,
-    )
+    lgbm_params = {**LGBM_TRAIN_CONFIG, "n_jobs": -1}
 
     X1, y1, X2a, y2a = _temporal_split(df, label_map, (1, 36), (37, 39), feature_cols)
     _, _, X3, y3 = _temporal_split(df, label_map, (1, 42), (40, 42), feature_cols)

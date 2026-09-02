@@ -10,17 +10,16 @@ from kyt_engine.features._utils import (
     safe_linregress,
 )
 
-WINDOWS = {"30d": 2, "60d": 4, "90d": 6}
-WINDOW_DAYS = {"30d": 30, "60d": 60, "90d": 90}
+# (размер окна в time_step, число дней) для каждого горизонта
+WINDOWS = {"30d": (2, 30), "60d": (4, 60), "90d": (6, 90)}
+
+NIGHT_HOURS = set(range(0, 6)) | set(range(22, 24))
+WORK_HOURS = set(range(9, 17))
+WEEKEND_DAYS = set(range(5, 7))
 
 
-def _window_activity(addr_df: pd.DataFrame, step_from: int, step_to: int, window_days: int = 30) -> dict[str, float]:
-    w = addr_df[(addr_df["time_step"] >= step_from) & (addr_df["time_step"] <= step_to)]
+def _activity_features(w: pd.DataFrame, window_days: int) -> dict[str, float]:
     f: dict[str, float] = {}
-
-    has_value = "value" in w.columns
-    has_gas = "gas_price" in w.columns
-
     f["tx_count"] = safe_float(len(w))
     f["poisson_lambda"] = safe_float(len(w) / window_days) if window_days > 0 else 0.0
 
@@ -33,11 +32,13 @@ def _window_activity(addr_df: pd.DataFrame, step_from: int, step_to: int, window
     else:
         f["avg_interval"] = 0.0
         f["burstiness"] = 0.0
+    return f
 
-    if has_value:
-        vals = w["value"].values.astype(np.float64)
-    else:
-        vals = np.array([0.0])
+
+def _value_features(w: pd.DataFrame) -> dict[str, float]:
+    f: dict[str, float] = {}
+    vals = w["value"].values.astype(np.float64) if "value" in w.columns else np.array([0.0])
+
     f["value_mean"] = safe_float(np.mean(vals))
     f["value_std"] = safe_float(np.std(vals))
     f["value_median"] = safe_float(np.median(vals))
@@ -51,10 +52,14 @@ def _window_activity(addr_df: pd.DataFrame, step_from: int, step_to: int, window
     else:
         f["value_trend"] = 0.0
 
-    if has_gas:
-        gas = w["gas_price"].values.astype(np.float64)
-    else:
-        gas = np.array([0.0])
+    f["value_entropy"] = safe_float(discretized_entropy(np.log1p(vals)))
+    return f
+
+
+def _gas_features(w: pd.DataFrame) -> dict[str, float]:
+    f: dict[str, float] = {}
+    gas = w["gas_price"].values.astype(np.float64) if "gas_price" in w.columns else np.array([0.0])
+
     f["gas_mean"] = safe_float(np.mean(gas))
     f["gas_std"] = safe_float(np.std(gas))
     gm = float(np.mean(gas))
@@ -66,17 +71,26 @@ def _window_activity(addr_df: pd.DataFrame, step_from: int, step_to: int, window
     else:
         f["gas_trend"] = 0.0
 
-    # Газовая стратегия: волатильность газа и премия (газ/медиана)
-    gas_sorted = w.sort_values("time_step")["gas_price"].values.astype(np.float64) if has_gas and len(w) > 0 else np.array([], dtype=float)
+    gas_sorted = (
+        w.sort_values("time_step")["gas_price"].values.astype(np.float64)
+        if "gas_price" in w.columns and len(w) > 0
+        else np.array([], dtype=float)
+    )
     gas_med = float(np.median(gas)) if len(gas) > 0 else 0.0
     if len(gas_sorted) >= 4:
         f["gas_volatility"] = safe_float(float(np.std(np.diff(gas_sorted))))
     else:
         f["gas_volatility"] = 0.0
     f["gas_premium"] = safe_float(gm / gas_med) if gas_med > 0 else 0.0
+    f["gas_entropy"] = safe_float(discretized_entropy(gas))
+    return f
 
+
+def _time_features(w: pd.DataFrame) -> dict[str, float]:
+    f: dict[str, float] = {}
     time_steps = w["time_step"].values if len(w) > 0 else np.array([], dtype=int)
     hours = (time_steps % 24).astype(int) if len(time_steps) > 0 else np.array([], dtype=int)
+
     if len(hours) > 0:
         hour_counts = np.bincount(hours, minlength=24).astype(float)
         total = float(hour_counts.sum())
@@ -87,14 +101,10 @@ def _window_activity(addr_df: pd.DataFrame, step_from: int, step_to: int, window
             f["hour_entropy"] = safe_float(float(-np.sum(nz * np.log2(nz))))
         else:
             f["hour_entropy"] = 0.0
-        night = set(range(0, 6)) | set(range(22, 24))
-        work = set(range(9, 17))
-        weekend = set(range(5, 7))
-        f["night_ratio"] = safe_float(sum(hour_counts[h] for h in night) / total) if total > 0 else 0.0
-        f["work_hours_ratio"] = safe_float(sum(hour_counts[h] for h in work) / total) if total > 0 else 0.0
-        f["weekend_ratio"] = safe_float(sum(hour_counts[h] for h in weekend) / total) if total > 0 else 0.0
+        f["night_ratio"] = safe_float(sum(hour_counts[h] for h in NIGHT_HOURS) / total) if total > 0 else 0.0
+        f["work_hours_ratio"] = safe_float(sum(hour_counts[h] for h in WORK_HOURS) / total) if total > 0 else 0.0
+        f["weekend_ratio"] = safe_float(sum(hour_counts[h] for h in WEEKEND_DAYS) / total) if total > 0 else 0.0
         f["peak_hour"] = safe_float(float(np.argmax(hour_counts)))
-        # Циркадный ритм: размах активных часов (активный период)
         active_hours = np.where(hour_counts > 0)[0]
         f["activity_period"] = safe_float(float(np.max(active_hours) - np.min(active_hours))) if len(active_hours) > 0 else 0.0
         if total > 0:
@@ -126,12 +136,17 @@ def _window_activity(addr_df: pd.DataFrame, step_from: int, step_to: int, window
     else:
         f["dow_entropy"] = 0.0
 
+    f["temporal_entropy"] = safe_float(discretized_entropy(hours.astype(float))) if len(hours) > 0 else 0.0
+    return f
+
+
+def _counterparty_features(w: pd.DataFrame, addr: str) -> dict[str, float]:
+    f: dict[str, float] = {}
     froms = w["from_address"].astype(str).values if len(w) > 0 else np.array([], dtype=str)
     tos = w["to_address"].astype(str).values if len(w) > 0 else np.array([], dtype=str)
-    addr_val = str(w["from_address"].iloc[0]) if len(w) > 0 else ""
 
-    in_counterparties = np.unique(tos[tos != addr_val]) if len(tos) > 0 else np.array([], dtype=str)
-    out_counterparties = np.unique(froms[froms != addr_val]) if len(froms) > 0 else np.array([], dtype=str)
+    in_counterparties = np.unique(tos[tos != addr]) if len(tos) > 0 else np.array([], dtype=str)
+    out_counterparties = np.unique(froms[froms != addr]) if len(froms) > 0 else np.array([], dtype=str)
     unique_in = len(in_counterparties)
     unique_out = len(out_counterparties)
     f["unique_in"] = safe_float(unique_in)
@@ -145,9 +160,8 @@ def _window_activity(addr_df: pd.DataFrame, step_from: int, step_to: int, window
     total_cp = len(in_partners | out_partners)
     f["reciprocity"] = safe_float(recip / total_cp) if total_cp > 0 else 0.0
 
-    # Сетевое разнообразие: энтропия Шеннона распределений контрагентов
     if unique_in > 0:
-        cp_in, cnt_in = np.unique(tos[tos != addr_val] if len(tos) > 0 else np.array([], dtype=str), return_counts=True)
+        _, cnt_in = np.unique(tos[tos != addr], return_counts=True)
         if cnt_in.sum() > 0:
             p_in = cnt_in.astype(float) / cnt_in.sum()
             f["entropy_in"] = safe_float(float(-np.sum(p_in * np.log2(p_in))))
@@ -157,7 +171,7 @@ def _window_activity(addr_df: pd.DataFrame, step_from: int, step_to: int, window
         f["entropy_in"] = 0.0
 
     if unique_out > 0:
-        cp_out, cnt_out = np.unique(froms[froms != addr_val] if len(froms) > 0 else np.array([], dtype=str), return_counts=True)
+        _, cnt_out = np.unique(froms[froms != addr], return_counts=True)
         if cnt_out.sum() > 0:
             p_out = cnt_out.astype(float) / cnt_out.sum()
             f["entropy_out"] = safe_float(float(-np.sum(p_out * np.log2(p_out))))
@@ -166,7 +180,7 @@ def _window_activity(addr_df: pd.DataFrame, step_from: int, step_to: int, window
     else:
         f["entropy_out"] = 0.0
 
-    all_cp = np.concatenate([in_counterparties, out_counterparties]) if total_cp > 0 else np.array([], dtype=int)
+    all_cp = np.concatenate([in_counterparties, out_counterparties]) if total_cp > 0 else np.array([], dtype=str)
     if len(all_cp) > 0:
         _, cnt_all = np.unique(all_cp, return_counts=True)
         if cnt_all.sum() > 0:
@@ -191,19 +205,21 @@ def _window_activity(addr_df: pd.DataFrame, step_from: int, step_to: int, window
         f["degree_concentration"] = 0.0
         f["new_cp_ratio"] = 0.0
 
-    v_log = np.log1p(vals)
-    f["value_entropy"] = safe_float(discretized_entropy(v_log))
-
-    cp_list = []
-    for p in froms[froms != addr_val]:
-        cp_list.append(str(p))
-    for p in tos[tos == addr_val]:
-        cp_list.append(str(p))
+    cp_list = [str(p) for p in froms[froms != addr]] + [str(p) for p in tos[tos == addr]]
     f["counterparty_entropy"] = safe_float(counting_entropy(cp_list))
+    return f
 
-    f["temporal_entropy"] = safe_float(discretized_entropy(hours.astype(float))) if len(hours) > 0 else 0.0
-    f["gas_entropy"] = safe_float(discretized_entropy(gas))
 
+def _window_activity(addr_df: pd.DataFrame, step_from: int, step_to: int, window_days: int = 30) -> dict[str, float]:
+    w = addr_df[(addr_df["time_step"] >= step_from) & (addr_df["time_step"] <= step_to)]
+    addr = str(w["from_address"].iloc[0]) if len(w) > 0 else ""
+
+    f: dict[str, float] = {}
+    f.update(_activity_features(w, window_days))
+    f.update(_value_features(w))
+    f.update(_gas_features(w))
+    f.update(_time_features(w))
+    f.update(_counterparty_features(w, addr))
     return f
 
 
@@ -227,12 +243,10 @@ def compute_behavioral_features(df: pd.DataFrame) -> pd.DataFrame:
         last_ts = int(addr_df["time_step"].max())
 
         feat: dict[str, float] = {}
-
         window_data: dict[str, dict[str, float]] = {}
-        for name, size in WINDOWS.items():
+        for name, (size, days) in WINDOWS.items():
             step_from = max(1, last_ts - size + 1)
-            step_to = last_ts
-            wd = _window_activity(addr_df, step_from, step_to, WINDOW_DAYS[name])
+            wd = _window_activity(addr_df, step_from, last_ts, days)
             for k, v in wd.items():
                 feat[f"{k}_{name}"] = v
             window_data[name] = wd
@@ -267,18 +281,16 @@ def compute_behavioral_features(df: pd.DataFrame) -> pd.DataFrame:
         else:
             feat["gas_acceleration"] = 0.0
 
-        # Скорость реакции: время между получением и действием (получение → исходящий)
-        # Приближение: интервалы между входящими и следующими исходящими транзакциями
         if "to_address" in addr_df.columns and "from_address" in addr_df.columns:
             addr_ts = addr_df.sort_values("time_step")
             if len(addr_ts) >= 2:
                 reaction_intervals: list[float] = []
                 for i in range(1, len(addr_ts)):
                     prev_to = str(addr_ts.iloc[i - 1]["to_address"])
+                    prev_from = str(addr_ts.iloc[i - 1]["from_address"])
                     cur_from = str(addr_ts.iloc[i]["from_address"])
                     cur_time = int(addr_ts.iloc[i]["time_step"])
                     prev_time = int(addr_ts.iloc[i - 1]["time_step"])
-                    # Если предыдущая транзакция получена, а текущая отправлена — интервал реакции
                     if prev_to != prev_from and cur_from == addr and cur_time > prev_time:
                         reaction_intervals.append(float(cur_time - prev_time))
                 if len(reaction_intervals) > 0:
