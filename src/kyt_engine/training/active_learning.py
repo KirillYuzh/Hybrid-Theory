@@ -253,3 +253,105 @@ class ActiveLearningPipeline:
             "priority_distribution": priorities,
             "export_path": str(export_path) if export_path else None,
         }
+
+
+class ActiveLearningSampler:
+    """Сэмплирование адресов для ручной разметки (блок 21.1).
+
+    Отбор на уровне адресов (поведенческих профилей), а не отдельных транзакций.
+    Комбинированный скор: uncertainty + diversity + cost-sensitive.
+    """
+
+    def __init__(
+        self,
+        entropy_threshold: float = 0.5,
+        diversity_weight: float = 0.3,
+        cost_weight: float = 0.3,
+        top_k: int = 100,
+    ):
+        self._entropy_threshold = entropy_threshold
+        self._diversity_weight = diversity_weight
+        self._cost_weight = cost_weight
+        self._top_k = top_k
+        self.sampled_addresses: set[str] = set()
+
+    def compute_entropy(self, proba_matrix: np.ndarray) -> pd.Series:
+        """Энтропия Шеннона для каждой строки матрицы вероятностей.
+
+        Поддерживает 1D (бинарный) и 2D (мультиклассовый) вход.
+        """
+        arr = np.asarray(proba_matrix, dtype=float)
+        if arr.ndim == 1:
+            p = np.clip(arr, 1e-10, 1 - 1e-10)
+            entropy = -(p * np.log2(p) + (1 - p) * np.log2(1 - p))
+        else:
+            p = np.clip(arr, 1e-10, 1.0)
+            entropy = -np.sum(p * np.log2(p), axis=1)
+        return pd.Series(entropy)
+
+    def uncertainty_score(self, df: pd.DataFrame) -> pd.Series:
+        """Комбинированный скор неопределённости.
+
+        score = norm(1 - entropy) + diversity_weight * novelty + cost_weight * norm(amount_usd)
+        novelty = обратная близость к уже отобранным адресам (пустое множество → 1.0).
+        """
+        df = df.copy()
+        entropy_col = "entropy" if "entropy" in df.columns else None
+        amount_col = "amount_usd" if "amount_usd" in df.columns else None
+
+        # Базовый скор неопределённости: чем выше энтропия, тем больше 1 - entropy
+        if entropy_col is not None:
+            base = (1.0 - df[entropy_col].astype(float).clip(0.0, 1.0)).fillna(0.0)
+        else:
+            base = pd.Series(0.0, index=df.index)
+
+        # Новизна: если адрес уже близок к отобранным, novelty снижается
+        if "address" in df.columns and self.sampled_addresses:
+            novelty = df["address"].apply(
+                lambda a: 0.5 if a in self.sampled_addresses else 1.0
+            ).astype(float)
+        else:
+            novelty = pd.Series(1.0, index=df.index)
+
+        # Стоимость ошибки: нормализация суммы
+        cost = pd.Series(0.0, index=df.index)
+        if amount_col is not None:
+            vals = df[amount_col].astype(float).fillna(0.0)
+            mx = float(vals.max()) if len(vals) > 0 and vals.max() > 0 else 1.0
+            cost = vals / mx
+
+        return base + self._diversity_weight * novelty + self._cost_weight * cost
+
+    def sample(self, features: pd.DataFrame) -> pd.DataFrame:
+        """Возвращает подмножество строк для ручной разметки.
+
+        Фильтрует строки с entropy > порога, группирует по адресу,
+        агрегирует скор по адресу, выбирает top_k адресов и обновляет sampled_addresses.
+        """
+        if features.empty:
+            return features.copy()
+
+        df = features.copy()
+        entropy_col = "entropy" if "entropy" in df.columns else None
+        if entropy_col is not None:
+            df = df[df[entropy_col].astype(float) > self._entropy_threshold].copy()
+
+        if df.empty:
+            return df
+
+        df["_score"] = self.uncertainty_score(df)
+
+        # Группировка по адресу (поведенческий профиль) — средний скор по адресу
+        address_col = "address" if "address" in df.columns else df.index.name
+        if address_col is None or address_col not in df.columns:
+            df["address"] = df.index.astype(str)
+            address_col = "address"
+
+        addr_scores = df.groupby(address_col)["_score"].mean().sort_values(ascending=False)
+        top_addrs = addr_scores.head(self._top_k).index.tolist()
+
+        # Обновляем внутреннее состояние отобранных адресов
+        self.sampled_addresses.update(top_addrs)
+
+        result = df[df[address_col].isin(top_addrs)].drop(columns=["_score"])
+        return result

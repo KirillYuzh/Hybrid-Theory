@@ -379,3 +379,120 @@ def run_full_scrape(max_pages: int = 3) -> pd.DataFrame:
     path = store.save(df)
     logger.info("Saved %d external labels to %s", len(df), path)
     return df
+
+
+# ---------------------------------------------------------------------------
+# Unified Scraper — trust-weighted merge + conflict resolution
+# ---------------------------------------------------------------------------
+
+class Scraper:
+    """
+    Единый источник внешних меток с весами доверия и разрешением конфликтов.
+
+    Агрегирует данные из нескольких источников (OFAC, CryptoScamDB, ethereum-lists),
+    нормализует их к единой схеме и выполняет доверительное слияние. Если источники
+    противоречат друг другу по одному адресу — эскалирует на ручную проверку.
+    """
+
+    confidence_weights: dict[str, float] = {
+        "ofac": 1.0,
+        "cryptoscamdb": 0.7,
+        "github": 0.3,
+    }
+
+    def __init__(self, sources: list | None = None):
+        """sources — список объектов с методом fetch() -> DataFrame/IPython list[LabeledAddress].
+
+        По умолчанию использует реальные HTTP-источники. Для офлайн-тестов можно
+        внедрить мок-объекты с тем же методом fetch().
+        """
+        if sources is None:
+            self._sources = [ScamDBScraper(), OFACScraper(), EthereumListsScraper()]
+        else:
+            self._sources = sources
+
+    def fetch_all(self) -> pd.DataFrame:
+        """Собирает данные из всех источников и возвращает объединённый DataFrame."""
+        frames: list[pd.DataFrame] = []
+        for src in self._sources:
+            try:
+                raw = src.fetch()
+                # Поддержка объектов, возвращающих list[LabeledAddress], и прямых DataFrame
+                if isinstance(raw, pd.DataFrame):
+                    frames.append(self.normalize(raw, source=src.__class__.__name__.lower()))
+                else:
+                    rows = [
+                        {
+                            "address": r.address.lower(),
+                            "label": r.label,
+                            "source": r.source,
+                            "category": r.category,
+                            "timestamp": r.timestamp,
+                        }
+                        for r in raw
+                    ]
+                    df = pd.DataFrame(rows)
+                    frames.append(self.normalize(df, source=src.__class__.__name__.lower()))
+            except Exception as exc:
+                logger.warning("Scraper source %s failed: %s", type(src).__name__, exc)
+        if not frames:
+            return pd.DataFrame(columns=["address", "label", "source", "confidence", "timestamp"])
+        return self.merge_sources(frames)
+
+    def normalize(self, raw: pd.DataFrame, source: str) -> pd.DataFrame:
+        """Нормализует сырые данные к единой схеме.
+
+        Выходные колонки: (address, label, source, confidence, timestamp)
+        confidence — вес доверия источника; timestamp — Unix-время (int).
+        """
+        if raw.empty:
+            return pd.DataFrame(columns=["address", "label", "source", "confidence", "timestamp"])
+
+        df = raw.copy()
+        if "address" not in df.columns:
+            if "addr" in df.columns:
+                df["address"] = df["addr"]
+            else:
+                df["address"] = df.index.astype(str)
+        df["address"] = df["address"].astype(str).str.lower()
+
+        if "label" not in df.columns:
+            df["label"] = "illicit"
+        if "source" not in df.columns:
+            df["source"] = source
+        if "timestamp" not in df.columns:
+            df["timestamp"] = int(datetime.now(timezone.utc).timestamp())
+        if "confidence" not in df.columns:
+            df["confidence"] = self.confidence_weights.get(source, self.confidence_weights.get(df["source"].iloc[0], 0.3))
+
+        # timestamp → Unix int
+        df["timestamp"] = df["timestamp"].apply(
+            lambda ts: int(datetime.fromisoformat(ts).timestamp())
+            if isinstance(ts, str) else int(ts)
+        )
+
+        return df[["address", "label", "source", "confidence", "timestamp"]]
+
+    def merge_sources(self, df_list: list[pd.DataFrame]) -> pd.DataFrame:
+        """Доверительное слияние источников; конфликты меток → label='REVIEW', confidence=0.5."""
+        if not df_list:
+            return pd.DataFrame(columns=["address", "label", "source", "confidence", "timestamp"])
+
+        combined = pd.concat(df_list, ignore_index=True)
+        combined = combined.sort_values("confidence", ascending=False)
+
+        # Определяем конфликт: один адрес с разными label от разных источников
+        dup_addresses = combined[combined.duplicated(subset=["address"], keep=False)]["address"].unique()
+        conflicting: set[str] = set()
+        for addr in dup_addresses:
+            labels = set(combined.loc[combined["address"] == addr, "label"])
+            if len(labels) > 1:
+                conflicting.add(addr)
+
+        # Эскалация конфликтов
+        conflict_mask = combined["address"].isin(conflicting)
+        combined.loc[conflict_mask, "label"] = "REVIEW"
+        combined.loc[conflict_mask, "confidence"] = 0.5
+
+        result = combined.drop_duplicates(subset=["address"], keep="first").reset_index(drop=True)
+        return result[["address", "label", "source", "confidence", "timestamp"]]
