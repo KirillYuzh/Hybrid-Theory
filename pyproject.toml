@@ -14,27 +14,33 @@ dependencies = [
     "numpy",
     "scikit-learn",
     "lightgbm",
-    "xgboost",
-    "torch",
-    "shap",
-    "mlflow",
     "fastapi",
     "uvicorn",
-    "feast",
+    "pydantic",
     "networkx",
     "plotly",
-    "streamlit",
-    "dask",
+    "dash",
     "pyarrow",
-    "optuna",
-    "node2vec",
-    "pyiceberg",
-    "duckdb",
-    "duckdb-engine",
     "jsonschema",
 ]
 
 [project.optional-dependencies]
+ml = [
+    "torch",
+    "shap",
+    "xgboost",
+    "optuna",
+    "mlflow",
+]
+graph = [
+    "node2vec",
+]
+lakehouse = [
+    "feast",
+    "pyiceberg",
+    "duckdb",
+    "duckdb-engine",
+]
 dev = [
     "pytest",
     "pytest-cov",

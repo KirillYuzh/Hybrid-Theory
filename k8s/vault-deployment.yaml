@@ -1,0 +1,78 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: vault-service
+  namespace: kyt-engine
+  labels:
+    app.kubernetes.io/name: kyt-engine
+    app.kubernetes.io/component: vault
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: kyt-engine
+    app.kubernetes.io/component: vault
+  ports:
+    - name: vault
+      port: 8200
+      targetPort: 8200
+      protocol: TCP
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vault
+  namespace: kyt-engine
+  labels:
+    app.kubernetes.io/name: kyt-engine
+    app.kubernetes.io/component: vault
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: kyt-engine
+      app.kubernetes.io/component: vault
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: kyt-engine
+        app.kubernetes.io/component: vault
+    spec:
+      containers:
+        - name: vault
+          image: hashicorp/vault:1.15.0
+          ports:
+            - containerPort: 8200
+              protocol: TCP
+          env:
+            - name: VAULT_DEV_ROOT_TOKEN_ID
+              value: "dev-root-token"
+            - name: VAULT_DEV_LISTEN_ADDRESS
+              value: "0.0.0.0:8200"
+          args:
+            - "server"
+            - "-dev"
+            - "-dev-root-token-id=dev-root-token"
+            - "-dev-listen-address=0.0.0.0:8200"
+          resources:
+            requests:
+              cpu: "250m"
+              memory: "256Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+          livenessProbe:
+            httpGet:
+              path: /v1/health
+              port: 8200
+            initialDelaySeconds: 10
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /v1/health
+              port: 8200
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3

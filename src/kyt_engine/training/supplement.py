@@ -31,7 +31,7 @@ def pseudo_label(
 
     proba = model.predict_proba(X_unknown)[:, 1]
 
-    high_conf_licit = (proba >= 0.0) & (proba <= (1.0 - confidence_threshold))
+    high_conf_licit = proba <= (1.0 - confidence_threshold)
     high_conf_illicit = proba >= confidence_threshold
 
     pseudo_mask = high_conf_licit | high_conf_illicit

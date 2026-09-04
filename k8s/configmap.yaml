@@ -9,6 +9,20 @@ data:
   KYT_ENV: "production"
   KYT_MODEL_DIR: "/app/models"
   KYT_DATA_DIR: "/app/data"
-  MINIO_ENDPOINT: "minio-service:9000"
+  # Iceberg / Hadoop
+  HADOOP_HOME: "/opt/hadoop"
+  ICEBERG_CATALOG: "hadoop"
+  ICEBERG_WAREHOUSE: "s3a://kyt-warehouse/"
+  # Kafka
+  KAFKA_BOOTSTRAP_SERVERS: "kafka:9092"
+  KAFKA_TOPIC_TRANSACTIONS: "transactions"
+  KAFKA_TOPIC_FEATURES: "features"
+  KAFKA_TOPIC_PREDICTIONS: "predictions"
+  KAFKA_TOPIC_DECISIONS: "decisions"
+  # Vault
+  VAULT_ADDR: "http://vault:8200"
+  VAULT_TOKEN: "dev-root-token"
+  VAULT_MOUNT_PATH: "secret"
+  # MinIO
   MINIO_ACCESS_KEY: "minioadmin"
   MINIO_SECRET_KEY: "minioadmin"

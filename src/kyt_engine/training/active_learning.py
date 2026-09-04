@@ -292,16 +292,16 @@ class ActiveLearningSampler:
     def uncertainty_score(self, df: pd.DataFrame) -> pd.Series:
         """Комбинированный скор неопределённости.
 
-        score = norm(1 - entropy) + diversity_weight * novelty + cost_weight * norm(amount_usd)
+        score = norm(entropy) + diversity_weight * novelty + cost_weight * norm(amount_usd)
         novelty = обратная близость к уже отобранным адресам (пустое множество → 1.0).
         """
         df = df.copy()
         entropy_col = "entropy" if "entropy" in df.columns else None
         amount_col = "amount_usd" if "amount_usd" in df.columns else None
 
-        # Базовый скор неопределённости: чем выше энтропия, тем больше 1 - entropy
+        # Базовый скор неопределённости: чем выше энтропия (неопределённость), тем выше base
         if entropy_col is not None:
-            base = (1.0 - df[entropy_col].astype(float).clip(0.0, 1.0)).fillna(0.0)
+            base = df[entropy_col].astype(float).clip(0.0, 1.0).fillna(0.0)
         else:
             base = pd.Series(0.0, index=df.index)
 

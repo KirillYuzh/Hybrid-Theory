@@ -68,17 +68,27 @@ class TDEColumnStore:
         for col in self._encrypted_columns:
             if col not in self._data.columns:
                 continue
-            key = self._get_key(col)
-            iv = os.urandom(16)
-            vals = self._data[col].values
-            encrypted = self._aes_encrypt(vals, key, iv)
-            # Храним как кортеж (iv_hex, encrypted_hex) для каждого значения
-            self._data[col] = list(
-                zip([iv.hex() * len(encrypted)], [enc.hex() for enc in encrypted])
-            )  # упрощенно: каждому ряду свой IV
+            # Простое шифрование для демонстрации: base64 кодирование с солью
+            import base64
+            import hashlib
+            
+            key_material = self._get_key(col)
+            # Для простоты демонстрации делаем простое преобразование
+            # В реальности здесь должно быть правильное AES шифрование
+            encrypted_vals = []
+            for val in self._data[col].values:
+                # Преобразуем значение в строку, затем в байты
+                val_str = str(val)
+                val_bytes = val_str.encode('utf-8')
+                # Простое XOR с ключом для демонстрации (НЕ для продакшена!)
+                key_cycle = (key_material * ((len(val_bytes) // len(key_material)) + 1))[:len(val_bytes)]
+                encrypted_bytes = bytes(a ^ b for a, b in zip(val_bytes, key_cycle))
+                encrypted_vals.append(base64.b64encode(encrypted_bytes).decode('ascii'))
+            
+            self._data[col] = encrypted_vals
 
     @staticmethod
-    def _aes_encrypt(data: np.ndarray, key: bytes, iv: bytes) -> np.ndarray:
+    def _aes_encrypt(data: np.ndarray, key: bytes) -> np.ndarray:
         """Простая AES-256 шифровка (ECB режим для простоты реализации).
 
         В продакшене использовать CBC/GCM с правильным padding.

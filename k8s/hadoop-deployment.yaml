@@ -1,0 +1,77 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: hadoop-service
+  namespace: kyt-engine
+  labels:
+    app.kubernetes.io/name: kyt-engine
+    app.kubernetes.io/component: hadoop
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: kyt-engine
+    app.kubernetes.io/component: hadoop
+  ports:
+    - name: namenode
+      port: 9000
+      targetPort: 9000
+      protocol: TCP
+    - name: namenode-http
+      port: 9870
+      targetPort: 9870
+      protocol: TCP
+    - name: resourcemanager
+      port: 8088
+      targetPort: 8088
+      protocol: TCP
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: hadoop
+  namespace: kyt-engine
+  labels:
+    app.kubernetes.io/name: kyt-engine
+    app.kubernetes.io/component: hadoop
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: kyt-engine
+      app.kubernetes.io/component: hadoop
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: kyt-engine
+        app.kubernetes.io/component: hadoop
+    spec:
+      containers:
+        - name: hadoop
+          image: bitnami/hadoop:3.3
+          ports:
+            - containerPort: 9000
+              protocol: TCP
+            - containerPort: 9870
+              protocol: TCP
+            - containerPort: 8088
+              protocol: TCP
+          env:
+            - name: HADOOP_CFG_NAME
+              value: "hadoop"
+            - name: HADOOP_CFG_DFS_NAMESERVICES
+              value: "namenode"
+            - name: HADOOP_CFG_DFS_NAMENODE_RPC_ADDRESS
+              value: "hadoop-service:9000"
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "512Mi"
+            limits:
+              cpu: "1"
+              memory: "1Gi"
+          volumeMounts:
+            - name: hadoop-data
+              mountPath: /bitnami/hadoop
+  volumes:
+    - name: hadoop-data
+      emptyDir: {}

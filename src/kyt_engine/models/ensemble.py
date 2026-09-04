@@ -36,12 +36,10 @@ class StackingEnsemble:
         beh_proba: np.ndarray | None,
     ) -> np.ndarray:
         # lgbm_proba[:, 1] is already a 1D array of shape (n,), reshape to (n, 1)
-        stacks = [lgbm_proba[:, 1:2], ae_proba[:, 1:2]]
+        stacks = [lgbm_proba[:, 1:2] if lgbm_proba.ndim == 2 else lgbm_proba[:, None],
+                  ae_proba[:, 1:2] if ae_proba.ndim == 2 else ae_proba[:, None]]
         if beh_proba is not None:
             stacks.append(np.asarray(beh_proba).reshape(-1, 1))
-        elif len(stacks) == 2:
-            # Pad with empty column when beh_proba is None for consistent shape
-            stacks.append(np.empty((lgbm_proba.shape[0], 0)))
         return np.hstack(stacks)
 
     def fit(

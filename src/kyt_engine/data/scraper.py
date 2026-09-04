@@ -5,11 +5,12 @@ import hashlib
 import io
 import json
 import logging
+import re
 import time
-import urllib.request
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Optional
 
 import pandas as pd
 
@@ -29,18 +30,23 @@ class LabeledAddress:
     category: str = ""
 
 
-def cached_fetch(url: str, max_age_hours: int = 24, timeout: int = 30) -> dict | list | str:
-    """Fetch URL with filesystem caching and exponential-backoff retry."""
+CONFIDENCE_WEIGHTS: dict[str, float] = {
+    "ethereum_lists": 0.8,
+    "open_source": 0.5,
+}
+
+
+def _cached_fetch(url: str, max_age_hours: int = 24, timeout: int = 30) -> str:
+    """Fetch URL with filesystem caching."""
+    import urllib.request
+
     cache_key = hashlib.md5(url.encode()).hexdigest()
     cache_path = CACHE_DIR / f"{cache_key}.json"
 
     if cache_path.exists():
         age = time.time() - cache_path.stat().st_mtime
         if age < max_age_hours * 3600:
-            try:
-                return json.loads(cache_path.read_text())
-            except json.JSONDecodeError:
-                pass
+            return cache_path.read_text()
 
     last_exc: Exception | None = None
     for attempt in range(3):
@@ -48,201 +54,124 @@ def cached_fetch(url: str, max_age_hours: int = 24, timeout: int = 30) -> dict |
             req = urllib.request.Request(url, headers={"User-Agent": "kyt-engine/1.0"})
             with urllib.request.urlopen(req, timeout=timeout) as resp:
                 body = resp.read().decode()
-            # Try to parse as JSON; fall back to raw string
-            try:
-                data = json.loads(body)
-            except json.JSONDecodeError:
-                data = body
             CACHE_DIR.mkdir(parents=True, exist_ok=True)
-            if isinstance(data, (dict, list)):
-                cache_path.write_text(json.dumps(data))
-            return data
+            cache_path.write_text(body)
+            return body
         except Exception as exc:
             last_exc = exc
             logger.warning("fetch %s attempt %d failed: %s", url, attempt + 1, exc)
             time.sleep(2 ** attempt)
-
     raise RuntimeError(f"Failed to fetch {url} after 3 attempts: {last_exc}")
 
 
-# ---------------------------------------------------------------------------
-# CryptoScamDB replacement — uses ethereum-lists/scam-db GitHub mirror
-# ---------------------------------------------------------------------------
+def _extract_eth_addresses(text: str) -> list[str]:
+    """Extract Ethereum addresses from raw text."""
+    pattern = re.compile(r"\b0x[0-9a-fA-F]{40}\b")
+    return pattern.findall(text)
 
-class ScamDBScraper:
-    """Fetches known scam/illicit addresses from ethereum-lists scam-db mirror.
-
-    The original CryptoScamDB API is dead (502). This uses the community
-    maintained GitHub mirror of scam address lists.
-    """
-
-    REPOS = [
-        # ethereum-lists maintains curated scam-address lists
-        "https://raw.githubusercontent.com/ethereum-lists/scam-db/main/data/addresses.json",
-        # Alt: transaction revert / phishing list
-        "https://raw.githubusercontent.com/ethereum-lists/master/addresses/ETH/0x0000000000000000000000000000000000000000.json",
-    ]
-
-    def fetch(self) -> list[LabeledAddress]:
-        all_addresses: list[LabeledAddress] = []
-        now = datetime.now(timezone.utc).isoformat()
-
-        for url in self.REPOS:
-            try:
-                data = cached_fetch(url, max_age_hours=12)
-            except Exception as e:
-                logger.warning("ScamDB fetch failed for %s: %s", url, e)
-                continue
-
-            items: list[dict] = []
-            if isinstance(data, list):
-                items = data if all(isinstance(x, dict) for x in data) else []
-            elif isinstance(data, dict):
-                items = data.get("result", data.get("addresses", []))
-                if not items:
-                    # Might be {address: {tag: ...}} format
-                    for addr, info in data.items():
-                        if isinstance(info, dict) and addr != "result":
-                            items.append({"address": addr, **info})
-
-            for entry in items:
-                if not isinstance(entry, dict):
-                    continue
-                addr = entry.get("address", "")
-                if not addr or not addr.startswith("0x"):
-                    continue
-                tag = entry.get("tag", entry.get("category", ""))
-                all_addresses.append(
-                    LabeledAddress(
-                        address=addr,
-                        label="illicit",
-                        source="scamdb",
-                        timestamp=now,
-                        category=str(tag).lower() if tag else "scam",
-                    )
-                )
-
-        logger.info("ScamDB: fetched %d addresses", len(all_addresses))
-        return all_addresses
-
-
-# ---------------------------------------------------------------------------
-# Ethereum-lists phishing lists
-# ---------------------------------------------------------------------------
 
 class EthereumListsScraper:
-    """Scrapes ethereum-lists GitHub for phishing/scam address blacklists."""
+    """Ethereum Lists — phishing и scam адреса из GitHub репозитория."""
 
-    REPOS = [
-        "https://raw.githubusercontent.com/ethereum-lists/master/addresses/ETH/tokenAddressess/0xdAC17F958D2ee523a2206206994597C13D831ec7.json",
+    URLS = [
+        "https://raw.githubusercontent.com/ethereum-lists/kservices/main/metadata/ETH/phishing-hosts.json",
+        "https://raw.githubusercontent.com/ethereum-lists/kservices/main/metadata/ETH/spam-hosts.json",
     ]
 
     def fetch(self) -> list[LabeledAddress]:
         all_addresses: list[LabeledAddress] = []
         now = datetime.now(timezone.utc).isoformat()
 
-        for url in self.REPOS:
+        for url in self.URLS:
             try:
-                data = cached_fetch(url, max_age_hours=12)
+                raw = _cached_fetch(url, max_age_hours=12, timeout=15)
+                data = json.loads(raw)
             except Exception as e:
                 logger.warning("EthereumLists fetch failed for %s: %s", url, e)
                 continue
 
-            if isinstance(data, list):
-                items = data
-            elif isinstance(data, dict):
-                items = data.get("tokens", data.get("addresses", [data]))
-            else:
-                continue
-
+            items = data if isinstance(data, list) else data.get("addresses", [])
             for entry in items:
-                if not isinstance(entry, dict):
+                if isinstance(entry, dict):
+                    addr = entry.get("address", entry.get("id", ""))
+                elif isinstance(entry, str):
+                    addr = entry
+                else:
                     continue
-                addr = entry.get("address", "")
-                if not addr:
-                    continue
-                all_addresses.append(
-                    LabeledAddress(
-                        address=addr,
-                        label="illicit",
-                        source="ethereum-lists",
-                        timestamp=now,
-                        category="phishing",
+                if addr.startswith("0x"):
+                    all_addresses.append(
+                        LabeledAddress(
+                            address=addr,
+                            label="illicit",
+                            source="ethereum_lists",
+                            timestamp=now,
+                            category="phishing",
+                        )
                     )
-                )
 
         logger.info("EthereumLists: fetched %d addresses", len(all_addresses))
         return all_addresses
 
 
-# ---------------------------------------------------------------------------
-# OFAC / OpenSanctions
-# ---------------------------------------------------------------------------
+class GitHubAddressesScraper:
+    """Скрапинг адресов с GitHub ethereum-lists (upd: urls darklist).
 
-class OFACScraper:
-    """Scrapes OFAC/US Treasury sanctions list for sanctioned crypto addresses."""
-
-    BASE_URL = "https://www.opensanctions.org/datasets/default/"
+    Источник: https://github.com/ethereum-lists/urls
+    Содержит known-scam адреса в формате URLs.
+    """
+    DARKLIST_URL = "https://raw.githubusercontent.com/ethereum-lists/urls/master/urls-darklist.json"
 
     def fetch(self) -> list[LabeledAddress]:
         all_addresses: list[LabeledAddress] = []
         now = datetime.now(timezone.utc).isoformat()
 
         try:
-            raw = cached_fetch(f"{self.BASE_URL}/targets.simple.csv", max_age_hours=6, timeout=60)
+            raw = _cached_fetch(self.DARKLIST_URL, max_age_hours=24, timeout=30)
+            data = json.loads(raw)
         except Exception as e:
-            logger.warning("OFAC CSV fetch failed: %s", e)
+            logger.warning("GitHubAddressesScraper fetch failed: %s", e)
             return all_addresses
 
-        if not isinstance(raw, str):
-            raw = str(raw)
+        if isinstance(data, list):
+            for entry in data:
+                if isinstance(entry, str):
+                    # URLs-darklist can contain full URLs or just addresses
+                    # Extract 0x... addresses
+                    import re
+                    addrs = re.findall(r"\b0x[0-9a-fA-F]{40}\b", entry)
+                    for addr in addrs:
+                        all_addresses.append(
+                            LabeledAddress(
+                                address=addr,
+                                label="illicit",
+                                source="open_source",
+                                timestamp=now,
+                                category="scam",
+                            )
+                        )
+                elif isinstance(entry, dict):
+                    addr = entry.get("address", entry.get("id", ""))
+                    if addr.startswith("0x"):
+                        all_addresses.append(
+                            LabeledAddress(
+                                address=addr.lower(),
+                                label="illicit",
+                                source="open_source",
+                                timestamp=now,
+                                category="scam",
+                            )
+                        )
 
-        reader = csv.reader(io.StringIO(raw))
-        rows = list(reader)
-        if not rows:
-            return all_addresses
-
-        header = rows[0]
-        addr_idx = None
-        for candidate in ("properties.currencyAddress", "cryptoCurrencyAddress"):
-            if candidate in header:
-                addr_idx = header.index(candidate)
-                break
-
-        if addr_idx is None:
-            logger.warning("OFAC CSV: no address column found in %s", header[:10])
-            return all_addresses
-
-        for cols in rows[1:]:
-            if addr_idx >= len(cols):
-                continue
-            addr = cols[addr_idx].strip()
-            if not addr or not addr.startswith("0x"):
-                continue
-            all_addresses.append(
-                LabeledAddress(
-                    address=addr,
-                    label="illicit",
-                    source="ofac",
-                    timestamp=now,
-                    category="sanctions",
-                )
-            )
-
-        logger.info("OFAC: fetched %d sanctioned addresses", len(all_addresses))
+        logger.info("GitHubAddresses: fetched %d addresses", len(all_addresses))
         return all_addresses
 
-
-# ---------------------------------------------------------------------------
-# External Label Store
-# ---------------------------------------------------------------------------
 
 class ExternalLabelStore:
     """Manages the external labels database. Merges labels from multiple sources."""
 
-    PRIORITY = {"ofac": 3, "scamdb": 2, "ethereum-lists": 1}
+    PRIORITY = {"ethereum_lists": 2, "open_source": 1}
 
-    def __init__(self, storage_dir: Path | None = None):
+    def __init__(self, storage_dir: Optional[Path] = None):
         self._dir = storage_dir or DATA_DIR
         self._dir.mkdir(parents=True, exist_ok=True)
 
@@ -303,56 +232,14 @@ class ExternalLabelStore:
         }
 
 
-# ---------------------------------------------------------------------------
-# Full scrape orchestrator
-# ---------------------------------------------------------------------------
-
-def run_full_scrape(max_pages: int = 3) -> pd.DataFrame:
-    """Run all scrapers and save merged results."""
-    scrapers = [ScamDBScraper(), OFACScraper(), EthereumListsScraper()]
-    all_labels: list[LabeledAddress] = []
-    for s in scrapers:
-        try:
-            labels = s.fetch()
-            logger.info("Fetched %d labels from %s", len(labels), type(s).__name__)
-            all_labels.extend(labels)
-        except Exception as e:
-            logger.warning("Scraper %s failed: %s", type(s).__name__, e)
-
-    store = ExternalLabelStore()
-    df = store.merge(all_labels)
-    path = store.save(df)
-    logger.info("Saved %d external labels to %s", len(df), path)
-    return df
-
-
-# ---------------------------------------------------------------------------
-# Unified Scraper — trust-weighted merge + conflict resolution
-# ---------------------------------------------------------------------------
-
 class Scraper:
-    """
-    Единый источник внешних меток с весами доверия и разрешением конфликтов.
+    """Единый источник внешних меток с весами доверия и разрешением конфликтов."""
 
-    Агрегирует данные из нескольких источников (OFAC, CryptoScamDB, ethereum-lists),
-    нормализует их к единой схеме и выполняет доверительное слияние. Если источники
-    противоречат друг другу по одному адресу — эскалирует на ручную проверку.
-    """
+    confidence_weights: dict[str, float] = CONFIDENCE_WEIGHTS
 
-    confidence_weights: dict[str, float] = {
-        "ofacscraper": 1.0,
-        "scamdbscraper": 0.7,
-        "ethereumlistsscraper": 0.3,
-    }
-
-    def __init__(self, sources: list | None = None):
-        """sources — список объектов с методом fetch() -> DataFrame/IPython list[LabeledAddress].
-
-        По умолчанию использует реальные HTTP-источники. Для офлайн-тестов можно
-        внедрить мок-объекты с тем же методом fetch().
-        """
+    def __init__(self, sources: Optional[list] = None):
         if sources is None:
-            self._sources = [ScamDBScraper(), OFACScraper(), EthereumListsScraper()]
+            self._sources = [EthereumListsScraper(), GitHubAddressesScraper()]
         else:
             self._sources = sources
 
@@ -362,9 +249,10 @@ class Scraper:
         for src in self._sources:
             try:
                 raw = src.fetch()
-                # Поддержка объектов, возвращающих list[LabeledAddress], и прямых DataFrame
                 if isinstance(raw, pd.DataFrame):
-                    frames.append(self.normalize(raw, source=src.__class__.__name__.lower()))
+                    frames.append(
+                        self._normalize_df(raw, source=src.__class__.__name__.lower())
+                    )
                 else:
                     rows = [
                         {
@@ -377,21 +265,23 @@ class Scraper:
                         for r in raw
                     ]
                     df = pd.DataFrame(rows)
-                    frames.append(self.normalize(df, source=src.__class__.__name__.lower()))
+                    frames.append(
+                        self._normalize_df(df, source=src.__class__.__name__.lower())
+                    )
             except Exception as exc:
                 logger.warning("Scraper source %s failed: %s", type(src).__name__, exc)
         if not frames:
-            return pd.DataFrame(columns=["address", "label", "source", "confidence", "timestamp"])
-        return self.merge_sources(frames)
+            return pd.DataFrame(
+                columns=["address", "label", "source", "confidence", "timestamp"]
+            )
+        return self._merge_sources(frames)
 
-    def normalize(self, raw: pd.DataFrame, source: str) -> pd.DataFrame:
-        """Нормализует сырые данные к единой схеме.
-
-        Выходные колонки: (address, label, source, confidence, timestamp)
-        confidence — вес доверия источника; timestamp — Unix-время (int).
-        """
+    def _normalize_df(self, raw: pd.DataFrame, source: str) -> pd.DataFrame:
+        """Нормализует сырые данные к единой схеме."""
         if raw.empty:
-            return pd.DataFrame(columns=["address", "label", "source", "confidence", "timestamp"])
+            return pd.DataFrame(
+                columns=["address", "label", "source", "confidence", "timestamp"]
+            )
 
         df = raw.copy()
         if "address" not in df.columns:
@@ -408,36 +298,59 @@ class Scraper:
         if "timestamp" not in df.columns:
             df["timestamp"] = int(datetime.now(timezone.utc).timestamp())
         if "confidence" not in df.columns:
-            df["confidence"] = self.confidence_weights.get(source, self.confidence_weights.get(df["source"].iloc[0], 0.3))
+            df["confidence"] = self.confidence_weights.get(source, 0.3)
 
-        # timestamp → Unix int
         df["timestamp"] = df["timestamp"].apply(
             lambda ts: int(datetime.fromisoformat(ts).timestamp())
-            if isinstance(ts, str) else int(ts)
+            if isinstance(ts, str)
+            else int(ts)
         )
 
         return df[["address", "label", "source", "confidence", "timestamp"]]
 
-    def merge_sources(self, df_list: list[pd.DataFrame]) -> pd.DataFrame:
+    def _merge_sources(self, df_list: list[pd.DataFrame]) -> pd.DataFrame:
         """Доверительное слияние источников; конфликты меток → label='REVIEW', confidence=0.5."""
         if not df_list:
-            return pd.DataFrame(columns=["address", "label", "source", "confidence", "timestamp"])
+            return pd.DataFrame(
+                columns=["address", "label", "source", "confidence", "timestamp"]
+            )
 
         combined = pd.concat(df_list, ignore_index=True)
         combined = combined.sort_values("confidence", ascending=False)
 
-        # Определяем конфликт: один адрес с разными label от разных источников
-        dup_addresses = combined[combined.duplicated(subset=["address"], keep=False)]["address"].unique()
+        dup_addresses = combined[combined.duplicated(subset=["address"], keep=False)][
+            "address"
+        ].unique()
         conflicting: set[str] = set()
         for addr in dup_addresses:
             labels = set(combined.loc[combined["address"] == addr, "label"])
             if len(labels) > 1:
                 conflicting.add(addr)
 
-        # Эскалация конфликтов
         conflict_mask = combined["address"].isin(conflicting)
         combined.loc[conflict_mask, "label"] = "REVIEW"
         combined.loc[conflict_mask, "confidence"] = 0.5
 
-        result = combined.drop_duplicates(subset=["address"], keep="first").reset_index(drop=True)
+        result = combined.drop_duplicates(
+            subset=["address"], keep="first"
+        ).reset_index(drop=True)
         return result[["address", "label", "source", "confidence", "timestamp"]]
+
+
+def run_full_scrape() -> pd.DataFrame:
+    """Run all scrapers and save merged results."""
+    scrapers = [EthereumListsScraper(), GitHubAddressesScraper()]
+    all_labels: list[LabeledAddress] = []
+    for s in scrapers:
+        try:
+            labels = s.fetch()
+            logger.info("Fetched %d labels from %s", len(labels), type(s).__name__)
+            all_labels.extend(labels)
+        except Exception as e:
+            logger.warning("Scraper %s failed: %s", type(s).__name__, e)
+
+    store = ExternalLabelStore()
+    df = store.merge(all_labels)
+    path = store.save(df)
+    logger.info("Saved %d external labels to %s", len(df), path)
+    return df

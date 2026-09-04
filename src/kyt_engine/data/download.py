@@ -4,15 +4,23 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
+from typing import NamedTuple
 
 import numpy as np
 import pandas as pd
 
 DATA_DIR = Path("data/raw")
-N_NODES = 1000
-N_EDGES = 3000
-FRACTION_ILLEGAL = 0.10
 SEED = 42
+
+
+class SyntheticDatasetConfig(NamedTuple):
+    n_nodes: int = 1000
+    n_edges: int = 3000
+    fraction_illegal: float = 0.10
+
+
+def generate_addresses(n: int, rng: np.random.Generator) -> list[str]:
+    return [f"0x{rng.bytes(20).hex()}" for _ in range(n)]
 
 
 def generate_nodes(n: int, rng: np.random.Generator) -> pd.DataFrame:
@@ -31,9 +39,9 @@ def generate_nodes(n: int, rng: np.random.Generator) -> pd.DataFrame:
             "value": rng.exponential(5.0, size=n).round(4),
             "gas_price": rng.integers(1, 100, size=n),
             "gas_used": rng.integers(21_000, 500_000, size=n),
-            "from_address": [f"0x{rng.bytes(20).hex()}" for _ in range(n)],
-            "to_address": [f"0x{rng.bytes(20).hex()}" for _ in range(n)],
-            "address": [f"0x{rng.bytes(20).hex()}" for _ in range(n)],
+            "from_address": generate_addresses(n, rng),
+            "to_address": generate_addresses(n, rng),
+            "address": generate_addresses(n, rng),
         }
     )
 
@@ -53,15 +61,18 @@ def generate_classes(
     return pd.DataFrame({"txId": tx_ids, "label": labels})
 
 
-def generate_dataset(output_dir: Path | None = None) -> Path:
-    """Generate synthetic Elliptic-like dataset. Returns output directory."""
+def generate_dataset(
+    output_dir: Path | None = None,
+    config: SyntheticDatasetConfig | None = None,
+) -> Path:
+    cfg = config or SyntheticDatasetConfig()
     out = output_dir or DATA_DIR
     out.mkdir(parents=True, exist_ok=True)
 
     rng = np.random.default_rng(SEED)
-    nodes = generate_nodes(N_NODES, rng)
-    edges = generate_edges(nodes["txId"].values, N_EDGES, rng)
-    classes = generate_classes(nodes["txId"].values, FRACTION_ILLEGAL, rng)
+    nodes = generate_nodes(cfg.n_nodes, rng)
+    edges = generate_edges(nodes["txId"].values, cfg.n_edges, rng)
+    classes = generate_classes(nodes["txId"].values, cfg.fraction_illegal, rng)
 
     nodes.to_csv(out / "nodes.csv", index=False)
     edges.to_csv(out / "edges.csv", index=False)
@@ -75,10 +86,6 @@ def main() -> None:
     args = parser.parse_args()
     out = generate_dataset(args.output)
     print(f"Dataset written to {out}/")
-    print(f"  nodes.csv   : {N_NODES} rows")
-    print(f"  edges.csv   : {N_EDGES} rows")
-    print(f"  classes.csv : {N_NODES} rows ({int(N_NODES * FRACTION_ILLEGAL)} illicit, "
-          f"{N_NODES - int(N_NODES * FRACTION_ILLEGAL)} licit)")
 
 
 if __name__ == "__main__":

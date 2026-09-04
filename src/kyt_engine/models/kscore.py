@@ -28,6 +28,7 @@ class KScoreCalculator:
         window_days: tuple[int, ...] = (30, 60, 90),
         default_threshold: float = 0.7,
         z_score_max: float = 3.0,
+        baseline_window: tuple[int, ...] | None = None,
     ):
         self._window_days = window_days
         self._default_threshold = default_threshold

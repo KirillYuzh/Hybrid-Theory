@@ -34,7 +34,7 @@ print("\n=== 2. K-Score ===", flush=True)
 t0 = time.time()
 from kyt_engine.models.kscore import KScoreCalculator
 feat_cols = [c for c in features.columns if c not in ('txId','label','time_step','from_address','to_address')]
-ksc = KScoreCalculator(baseline_window=6)
+ksc = KScoreCalculator()
 ksc.fit(features, features['time_step'])
 k_scores = ksc.score(features)
 zones = ksc.classify(k_scores)

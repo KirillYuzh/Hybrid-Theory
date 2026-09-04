@@ -4,8 +4,8 @@ data:
   processed_path: data/processed
 
 features:
-  n_base_features: 166
-  n_behavioral_features: 30
+  n_base_features: 165
+  n_behavioral_features: 26
 
 models:
   lightgbm:

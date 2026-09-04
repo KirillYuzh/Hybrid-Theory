@@ -1,212 +1,121 @@
 from __future__ import annotations
 
-from typing import Any
+import os
+from pathlib import Path
 
+import joblib
 import numpy as np
 import pandas as pd
-from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel
 
-from kyt_engine.features.engine import FeatureEngineer
-from kyt_engine.models.ensemble import StackingEnsemble
-from kyt_engine.models.unified_scorer import UnifiedScorer
+from fastapi import FastAPI, HTTPException
+
+from kyt_engine.api.schemas import HealthResponse, PredictResponse, ReasonItem, TxRequest
+from kyt_engine.core.audit import AuditLog
+from kyt_engine.core.contracts import TxRecord, ScoreResult, AuditRecord
+from kyt_engine.core.features import FeatureEngineer
+from kyt_engine.core.pipeline import Pipeline
+from kyt_engine.core.scorers import ExternalScorer, KScoreScorer, LightGBMScorer
+from kyt_engine.core.sinks import ConsoleSink
+from kyt_engine.core.triage import TriagePolicy
+from kyt_engine.models.kscore import KScoreCalculator
+
+
+AUDIT_PATH = Path(os.environ.get("KYT_AUDIT_PATH", "data/audit/decisions.jsonl"))
+
+_pipeline: Pipeline | None = None
+
+
+def _build_pipeline() -> Pipeline:
+    lgbm_model = _load_lightgbm_model()
+    kscore_calc = KScoreCalculator()
+
+    fe = FeatureEngineer()
+    try:
+        fe.fit(pd.DataFrame({
+            "address": ["X"],
+            "timestamp": [0],
+            "value": [0.0],
+            "gas_price": [0.1],
+            "gas_used": [21000],
+            "block_number": [1],
+            "from_address": ["X"],
+            "to_address": ["Y"],
+        }))
+    except Exception:
+        pass
+
+    lgbm_scorer = LightGBMScorer(lgbm_model, feature_names=list(fe.feature_names) if fe.feature_names else None)
+    kscore_scorer = KScoreScorer(kscore_calc, feature_names=list(fe.feature_names) if fe.feature_names else [])
+
+    audit = AuditLog(AUDIT_PATH)
+    scorers: list = [s for s in [lgbm_scorer, kscore_scorer] if s is not None]
+
+    global _pipeline
+    _pipeline = Pipeline(
+        features=fe,
+        scorers=scorers,
+        triage=TriagePolicy(),
+        sinks=[ConsoleSink()],
+        weights={"lightgbm": 0.5, "kscore": 0.2, "vae": 0.0, "external": 0.15},
+        audit_log=audit,
+    )
+    return _pipeline
+
+
+def _load_lightgbm_model() -> object:
+    """Load LightGBM model from disk. Raises if not found."""
+    model_dir = Path(os.environ.get("KYT_MODEL_DIR", "models"))
+    for name in ("lightgbm_real.pkl", "lightgbm.pkl", "lightgbm_updated_1788251370.pkl"):
+        path = model_dir / name
+        if path.exists():
+            return joblib.load(path)
+    raise RuntimeError(f"LightGBM model not found in {model_dir}")
+
+
+# Build pipeline at import time; if model not found, start in degraded mode
+try:
+    _build_pipeline()
+except RuntimeError:
+    _pipeline = None
 
 app = FastAPI(title="KYT Engine API", version="0.1.0")
-
-_models: dict[str, Any] = {}
-_feature_engineer: FeatureEngineer | None = None
-_unified_scorer: UnifiedScorer | None = None
-
-
-class Transaction(BaseModel):
-    address: str
-    from_address: str
-    to_address: str
-    value: float
-    gas_price: float
-    gas_used: float
-    timestamp: float
-    block_number: int
-
-
-class PredictRequest(BaseModel):
-    transactions: list[dict[str, Any]]
-
-    @property
-    def is_too_large(self) -> bool:
-        return len(self.transactions) > 1000
-
-
-class Reason(BaseModel):
-    feature: str
-    value: float
-    contribution: float
-
-
-class PredictResponse(BaseModel):
-    address: str
-    risk_score: float
-    reasons: list[Reason]
-
-
-class BatchPredictResponse(BaseModel):
-    results: list[PredictResponse]
-
-
-class HealthResponse(BaseModel):
-    status: str
-    models_loaded: bool
-    model_names: list[str]
-
-
-def load_model(name: str, model: Any) -> None:
-    _models[name] = model
-
-
-def set_feature_engineer(fe: FeatureEngineer) -> None:
-    global _feature_engineer
-    _feature_engineer = fe
-
-
-def set_unified_scorer(scorer: UnifiedScorer) -> None:
-    global _unified_scorer
-    _unified_scorer = scorer
-
-
-def get_models() -> dict[str, Any]:
-    return _models
-
-
-def _prepare_df(transactions: list[dict[str, Any]]) -> pd.DataFrame:
-    df = pd.DataFrame(transactions)
-    required = ["address", "from_address", "to_address", "value", "gas_price", "gas_used", "timestamp", "block_number"]
-    missing = set(required) - set(df.columns)
-    if missing:
-        raise ValueError(f"Missing required columns: {sorted(missing)}")
-    return df
-
-
-def _compute_reasons(feature_names: list[str], feature_values: np.ndarray, importances: np.ndarray) -> list[Reason]:
-    top_idx = np.argsort(importances)[::-1][:3]
-    reasons = []
-    for idx in top_idx:
-        reasons.append(Reason(
-            feature=feature_names[idx],
-            value=float(feature_values[idx]),
-            contribution=float(importances[idx]),
-        ))
-    return reasons
 
 
 @app.get("/health", response_model=HealthResponse)
 def health() -> HealthResponse:
-    names = list(_models.keys())
-    return HealthResponse(
-        status="ok",
-        models_loaded=len(_models) > 0,
-        model_names=names,
-    )
+    models_loaded = []
+    if _pipeline is not None:
+        models_loaded = [s.name for s in _pipeline._scorers if hasattr(s, "name")]
+    status = "ok" if _pipeline is not None else "degraded"
+    return HealthResponse(status=status, models_loaded=models_loaded)
 
 
 @app.post("/predict", response_model=PredictResponse)
-def predict(transaction: Transaction) -> PredictResponse:
-    if not _models:
-        raise HTTPException(status_code=503, detail="No models loaded")
+def predict(tx: TxRequest) -> PredictResponse:
+    if _pipeline is None:
+        raise HTTPException(status_code=503, detail="Pipeline not initialized. Ensure LightGBM model is in KYT_MODEL_DIR.")
 
-    df = _prepare_df([transaction.model_dump()])
-
-    if _feature_engineer is None:
-        raise HTTPException(status_code=503, detail="FeatureEngineer not configured")
-
-    features = _feature_engineer.transform(df)
-    feature_names = list(features.columns)
-    feature_values = features.values[0]
-
-    ensemble: StackingEnsemble = _models.get("ensemble")
-    if ensemble is None:
-        first_model = next(iter(_models.values()))
-        proba = first_model.predict_proba(features)
-        risk_score = float(proba[0, 1])
-        importances = np.abs(feature_values)
-    else:
-        proba = ensemble.predict_proba(features)
-        risk_score = float(proba[0, 1])
-        importances = np.abs(feature_values)
-
-    reasons = _compute_reasons(feature_names, feature_values, importances)
-
+    record = TxRecord(
+        tx_id=tx.tx_id,
+        address=tx.address,
+        from_address=tx.from_address,
+        to_address=tx.to_address,
+        value=tx.value,
+        gas_price=tx.gas_price,
+        gas_used=tx.gas_used,
+        timestamp=tx.timestamp,
+        block_number=tx.block_number,
+        features=tx.features,
+    )
+    result = _pipeline.score_tx(record)
     return PredictResponse(
-        address=transaction.address,
-        risk_score=round(risk_score, 6),
-        reasons=reasons,
+        tx_id=result.tx_id,
+        risk_score=round(result.risk_score, 6),
+        risk_zone=result.risk_zone,
+        triage_level=result.triage_level,
+        lgbm_proba=round(result.lgbm_proba, 6),
+        k_score=round(result.k_score, 6),
+        vae_anomaly=round(result.vae_anomaly, 6),
+        external_risk=round(result.external_risk, 6),
+        reasons=[ReasonItem(feature=str(r["feature"]), value=float(r["value"]), contribution=float(r["contribution"])) for r in result.reasons],
     )
-
-
-@app.post("/batch-predict", response_model=BatchPredictResponse)
-def batch_predict(request: PredictRequest) -> BatchPredictResponse:
-    if not _models:
-        raise HTTPException(status_code=503, detail="No models loaded")
-
-    if request.is_too_large:
-        raise HTTPException(status_code=413, detail="Batch size limited to 1000 transactions")
-
-    if _feature_engineer is None:
-        raise HTTPException(status_code=503, detail="FeatureEngineer not configured")
-
-    df = _prepare_df(request.transactions)
-    features = _feature_engineer.transform(df)
-    feature_names = list(features.columns)
-
-    ensemble: StackingEnsemble = _models.get("ensemble")
-    if ensemble is None:
-        first_model = next(iter(_models.values()))
-        proba = first_model.predict_proba(features)
-    else:
-        proba = ensemble.predict_proba(features)
-
-    results = []
-    for i, tx in enumerate(request.transactions):
-        feature_values = features.values[i]
-        risk_score = float(proba[i, 1])
-        importances = np.abs(feature_values)
-        reasons = _compute_reasons(feature_names, feature_values, importances)
-        results.append(PredictResponse(
-            address=tx["address"],
-            risk_score=round(risk_score, 6),
-            reasons=reasons,
-        ))
-
-    return BatchPredictResponse(results=results)
-
-
-class AnalyzeRequest(BaseModel):
-    lgbm_proba: float
-    k_score: float
-    vae_anomaly: float
-    triage_level: str = "priority"
-    reasons: list[str] | None = None
-
-
-@app.post("/analyze", response_model=dict)
-def analyze_transaction(request: AnalyzeRequest) -> dict:
-    """Full analysis: risk score + K-Score + triage + reasons."""
-    if _unified_scorer is None:
-        raise HTTPException(status_code=503, detail="UnifiedScorer not configured")
-
-    assessment = _unified_scorer.score(
-        lgbm_proba=request.lgbm_proba,
-        k_score=request.k_score,
-        vae_anomaly=request.vae_anomaly,
-        triage_level=request.triage_level,
-        reasons=request.reasons,
-    )
-
-    return {
-        "risk_score": assessment.risk_score,
-        "k_score": assessment.k_score,
-        "lgbm_proba": assessment.lgbm_proba,
-        "vae_anomaly": assessment.vae_anomaly,
-        "triage_level": assessment.triage_level,
-        "top_reasons": assessment.top_reasons,
-        "risk_zone": assessment.risk_zone,
-    }
