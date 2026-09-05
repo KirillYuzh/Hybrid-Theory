@@ -1,0 +1,48 @@
+# Group variables for kyt-engine
+
+# Common variables applied to all groups
+kyt_engine:
+  install_dir: "/opt/kyt-engine"
+  venv_dir: "/opt/kyt-engine/.venv"
+  model_dir: "/opt/kyt-engine/models"
+  data_dir: "/opt/kyt-engine/data"
+  log_dir: "/var/log/kyt-engine"
+  config_dir: "/opt/kyt-engine/config"
+  python_version: "3.12"
+
+# API settings
+kyt_engine_api:
+  host: "0.0.0.0"
+  port: 8000
+  workers: 4
+  host_key: "{{ ansible_secrets.get('API_HOST_KEY', 'default-change-me') }}"
+  api_key: "{{ ansible_secrets.get('API_API_KEY', 'default-change-me') }}"
+
+# Kafka settings
+kyt_engine_kafka:
+  bootstrap_servers: "kafka:9092"
+  transactions_topic: "transactions"
+  features_topic: "features"
+  predictions_topic: "predictions"
+  decisions_topic: "decisions"
+
+# MinIO settings
+kyt_engine_minio:
+  endpoint: "minio:9000"
+  access_key: "{{ ansible_secrets.get('MINIO_ACCESS_KEY', 'minioadmin') }}"
+  secret_key: "{{ ansible_secrets.get('MINIO_SECRET_KEY', 'minioadmin') }}"
+  bucket: "kyt-engine"
+
+# Vault settings
+kyt_engine_vault:
+  address: "http://vault:8200"
+  token: "{{ ansible_secrets.get('VAULT_TOKEN', 'dev-root-token') }}"
+  mount_path: "secret"
+
+# PostgreSQL settings (for audit)
+kyt_engine_audit:
+  db_host: "postgres"
+  db_port: 5432
+  db_name: "kyt_audit"
+  db_user: "kyt_user"
+  db_password: "{{ ansible_secrets.get('POSTGRES_PASSWORD', 'change-me') }}"

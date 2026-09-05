@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import csv
 import hashlib
 import io
@@ -34,6 +32,8 @@ CONFIDENCE_WEIGHTS: dict[str, float] = {
     "ethereum_lists": 0.8,
     "open_source": 0.5,
 }
+
+DEFAULT_CONFIDENCE = 0.5
 
 
 def _cached_fetch(url: str, max_age_hours: int = 24, timeout: int = 30) -> str:
@@ -71,7 +71,7 @@ def _extract_eth_addresses(text: str) -> list[str]:
 
 
 class EthereumListsScraper:
-    """Ethereum Lists — phishing и scam адреса из GitHub репозитория."""
+    """Ethereum Lists — phishing and scam addresses from GitHub repository."""
 
     URLS = [
         "https://raw.githubusercontent.com/ethereum-lists/kservices/main/metadata/ETH/phishing-hosts.json",
@@ -114,10 +114,10 @@ class EthereumListsScraper:
 
 
 class GitHubAddressesScraper:
-    """Скрапинг адресов с GitHub ethereum-lists (upd: urls darklist).
+    """Scraping addresses from GitHub ethereum-lists (upd: urls darklist).
 
-    Источник: https://github.com/ethereum-lists/urls
-    Содержит known-scam адреса в формате URLs.
+    Source: https://github.com/ethereum-lists/urls
+    Contains known-scam addresses in URL format.
     """
     DARKLIST_URL = "https://raw.githubusercontent.com/ethereum-lists/urls/master/urls-darklist.json"
 
@@ -137,7 +137,6 @@ class GitHubAddressesScraper:
                 if isinstance(entry, str):
                     # URLs-darklist can contain full URLs or just addresses
                     # Extract 0x... addresses
-                    import re
                     addrs = re.findall(r"\b0x[0-9a-fA-F]{40}\b", entry)
                     for addr in addrs:
                         all_addresses.append(
@@ -233,7 +232,7 @@ class ExternalLabelStore:
 
 
 class Scraper:
-    """Единый источник внешних меток с весами доверия и разрешением конфликтов."""
+    """Unified source of external labels with confidence weights and conflict resolution."""
 
     confidence_weights: dict[str, float] = CONFIDENCE_WEIGHTS
 
@@ -244,7 +243,7 @@ class Scraper:
             self._sources = sources
 
     def fetch_all(self) -> pd.DataFrame:
-        """Собирает данные из всех источников и возвращает объединённый DataFrame."""
+        """Collects data from all sources and returns merged DataFrame."""
         frames: list[pd.DataFrame] = []
         for src in self._sources:
             try:
@@ -277,7 +276,7 @@ class Scraper:
         return self._merge_sources(frames)
 
     def _normalize_df(self, raw: pd.DataFrame, source: str) -> pd.DataFrame:
-        """Нормализует сырые данные к единой схеме."""
+        """Normalize raw data to a common schema."""
         if raw.empty:
             return pd.DataFrame(
                 columns=["address", "label", "source", "confidence", "timestamp"]
@@ -298,7 +297,7 @@ class Scraper:
         if "timestamp" not in df.columns:
             df["timestamp"] = int(datetime.now(timezone.utc).timestamp())
         if "confidence" not in df.columns:
-            df["confidence"] = self.confidence_weights.get(source, 0.3)
+            df["confidence"] = self.confidence_weights.get(source, DEFAULT_CONFIDENCE)
 
         df["timestamp"] = df["timestamp"].apply(
             lambda ts: int(datetime.fromisoformat(ts).timestamp())
@@ -309,7 +308,7 @@ class Scraper:
         return df[["address", "label", "source", "confidence", "timestamp"]]
 
     def _merge_sources(self, df_list: list[pd.DataFrame]) -> pd.DataFrame:
-        """Доверительное слияние источников; конфликты меток → label='REVIEW', confidence=0.5."""
+        """Confidence-weighted merge; label conflicts -> label='REVIEW', confidence=0.5."""
         if not df_list:
             return pd.DataFrame(
                 columns=["address", "label", "source", "confidence", "timestamp"]

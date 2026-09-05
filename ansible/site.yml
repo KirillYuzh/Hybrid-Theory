@@ -1,0 +1,54 @@
+---
+# Main playbook for kyt-engine deployment
+- name: Setup kyt-engine infrastructure
+  hosts: all
+  become: true
+  tags: [always]
+
+  pre_tasks:
+    - name: Update apt cache
+      ansible.builtin.apt:
+        update_cache: yes
+        cache_valid_time: 3600
+
+    - name: Install system dependencies
+      ansible.builtin.package:
+        name:
+          - curl
+          - wget
+          - gnupg
+          - apt-transport-https
+          - ca-certificates
+          - software-properties-common
+        state: present
+
+    - name: Set hostname
+      ansible.builtin.hostname:
+        name: "{{ inventory_hostname }}"
+
+  roles:
+    - role: geerlingguy.docker
+      when: docker_install | bool
+
+  pre_tasks:
+    - name: Apply group vars
+      include_tasks: "tasks/setup-{inventory_hostname}.yml"
+      tags: [setup]
+
+    - name: Include OS-specific tasks
+      include: "tasks/{{ ansible_os_family }}.yml"
+      tags: [os-specific]
+
+    - name: Configure kyt-engine
+      include_playbook: "{{ ansible_user_dir }}/kyt-engine.yml" if ansible_user_dir is defined else skip
+
+  post_tasks:
+    - name: Verify installation
+      ansible.builtin.command: "curl -s http://localhost:8000/health || echo 'API not ready'"
+      register: health_check
+      changed_when: false
+
+    - name: Display results
+      ansible.builtin.debug:
+        msg: "Installation complete. Health check: {{ health_check.rc }}"
+      tags: [always]

@@ -9,7 +9,7 @@
 
 ## Аннотация
 
-KYT Engine — это автономная система Know Your Transaction (KYT) для AML-комплаенса в криптовалютной сфере банковского сектора. Реализована на датасете Bitcoin Elliptic (203,769 транзакций, 46,564 размеченных), система извлекает 191 признак (165 статистических + 26 поведенческих), дополненных графовыми Node2Vec эмбеддингами (64 измерения), и классифицирует транзакции с помощью многоуровневого ансамбля: LightGBM, K-Score (anomaly detection), VAE (вариационный автоэнкодер), External Labels (OFAC, GoPlus, ScamDB) и Stacking Ensemble. Промышленный скоринг выполняется через Unified Scorer, который объединяет все четыре сигнала во взвешенный risk_score, маппит его в risk_zone и присваивает triage_level. Human-in-the-loop улучшение модели обеспечивается Active Learning с uncertainty sampling.
+Hybrid Theory — это Know Your Transaction (KYT) движок для AML-комплаенса в криптовалютной сфере банковского сектора. Реализована на датасете Bitcoin Elliptic (203,769 транзакций, 46,564 размеченных), система извлекает 191 признак (165 статистических + 26 поведенческих), дополненных графовыми Node2Vec эмбеддингами (64 измерения), и классифицирует транзакции с помощью многоуровневого ансамбля: LightGBM, K-Score (anomaly detection), VAE (вариационный автоэнкодер), External Labels (OFAC, GoPlus, ScamDB) и Stacking Ensemble. Промышленный скоринг выполняется через Unified Scorer, который объединяет все четыре сигнала во взвешенный risk_score, маппит его в risk_zone и присваивает triage_level. Human-in-the-loop улучшение модели обеспечивается Active Learning с uncertainty sampling.
 
 **Ключевые результаты:**
 - **LightGBM**: AUC-ROC = 0.9549, F1 = 0.9878, Recall = 0.9989 на валидации (t=37–44)

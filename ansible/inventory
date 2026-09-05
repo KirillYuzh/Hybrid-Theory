@@ -1,0 +1,5 @@
+[production]
+kyt-engine-production ansible_host=89.169.179.114
+
+[staging]
+kyt-engine-staging ansible_host=127.0.0.1

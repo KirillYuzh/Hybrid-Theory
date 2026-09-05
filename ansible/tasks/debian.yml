@@ -1,0 +1,19 @@
+- name: Install Python3 and pip
+  ansible.builtin.package:
+    name:
+      - python3
+      - python3-pip
+    state: present
+
+- name: Install Docker
+  ansible.builtin.command: "curl -fsSL https://get.docker.com | sh"
+  args:
+    creates: "/usr/bin/docker"
+
+- name: Install Python dependencies
+  ansible.builtin.pip:
+    name:
+      - kyt-engine
+      - pytest
+    extra_args: "--quiet"
+  when: ansible_facts['python_facts']['is_msie'] | bool | not

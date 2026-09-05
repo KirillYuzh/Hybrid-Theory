@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 from typing import Protocol
 
 from kyt_engine.core.contracts import ScoreResult

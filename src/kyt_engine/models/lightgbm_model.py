@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import numpy as np
 import pandas as pd
 from lightgbm import LGBMClassifier
@@ -7,7 +5,8 @@ from sklearn.isotonic import IsotonicRegression
 
 from kyt_engine.features._utils import find_best_threshold, prepare_features
 
-LGBM_CONFIG: dict[str, object] = {
+
+DEFAULT_CONFIG = {
     "n_estimators": 500,
     "learning_rate": 0.05,
     "max_depth": -1,
@@ -18,26 +17,17 @@ LGBM_CONFIG: dict[str, object] = {
     "reg_alpha": 0.1,
     "reg_lambda": 1.0,
     "class_weight": "balanced",
-    "random_state": 42,
+    "random_state": 123,
     "verbose": -1,
     "n_jobs": 1,
 }
 
-# Production-конфиг для полного обучения (используется в training/*)
-LGBM_TRAIN_CONFIG: dict[str, object] = {
+TRAIN_CONFIG = {
+    **DEFAULT_CONFIG,
     "n_estimators": 800,
-    "learning_rate": 0.05,
     "num_leaves": 127,
-    "max_depth": -1,
     "min_child_samples": 10,
-    "subsample": 0.8,
-    "colsample_bytree": 0.8,
-    "reg_alpha": 0.1,
-    "reg_lambda": 1.0,
-    "class_weight": "balanced",
-    "random_state": 42,
-    "verbose": -1,
-    "n_jobs": 1,
+    "random_state": 456,
 }
 
 
@@ -53,12 +43,12 @@ class LightGBMClassifier:
         colsample_bytree: float = 0.8,
         reg_alpha: float = 0.1,
         reg_lambda: float = 1.0,
-        random_state: int = 42,
+        random_state: int = 123,
     ) -> None:
         self._threshold: float = 0.5
         self._feature_names: list[str] = []
 
-        params: dict[str, object] = {
+        params: dict = {
             "n_estimators": n_estimators,
             "learning_rate": learning_rate,
             "max_depth": max_depth,
@@ -83,7 +73,7 @@ class LightGBMClassifier:
         y: pd.Series,
         X_cal: pd.DataFrame | None = None,
         y_cal: pd.Series | None = None,
-    ) -> LightGBMClassifier:
+    ) -> "LightGBMClassifier":
         X_train, y_train = prepare_features(X, y)
         self._feature_names = list(X_train.columns)
 
@@ -104,6 +94,8 @@ class LightGBMClassifier:
         return self
 
     def predict_proba(self, X: pd.DataFrame) -> np.ndarray:
+        if not self._model.fitted_:
+            raise RuntimeError("Model not fitted. Call fit() first.")
         X_, _ = prepare_features(X)
         raw = self._model.predict_proba(X_)[:, 1]
         if self._calibrator is not None:
@@ -123,3 +115,7 @@ class LightGBMClassifier:
     @property
     def feature_names(self) -> list[str]:
         return list(self._feature_names)
+
+    @classmethod
+    def with_train_config(cls) -> "LightGBMClassifier":
+        return cls(**TRAIN_CONFIG)

@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import logging
 import pickle
 from pathlib import Path
@@ -44,8 +42,6 @@ def _save_model(model: object, name: str) -> Path:
 def run_training() -> None:
     from kyt_engine.features.engine import FeatureEngineer
     from kyt_engine.metrics.classification import classification_report
-    from kyt_engine.models.autoencoder import AutoencoderDetector
-    from kyt_engine.models.ensemble import StackingEnsemble
     from kyt_engine.models.lightgbm_model import LightGBMClassifier
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -65,7 +61,7 @@ def run_training() -> None:
         mlflow.log_param("n_features_engineered", fe.n_features)
 
         X_train, X_test, y_train, y_test = train_test_split(
-            X, y, test_size=0.2, stratify=y, random_state=42,
+            X, y, test_size=0.2, stratify=y, random_state=123,
         )
         mlflow.log_param("train_size", len(X_train))
         mlflow.log_param("test_size", len(X_test))
@@ -84,39 +80,6 @@ def run_training() -> None:
         for k, v in results["lightgbm"].items():
             mlflow.log_metric(f"lgbm_{k}", v)
         logger.info("LightGBM metrics:\n%s", lgbm_metrics)
-
-        # Autoencoder
-        logger.info("Training Autoencoder")
-        ae = AutoencoderDetector(epochs=50, batch_size=128, device="cpu")
-        ae.fit(X_train, y_train)
-        ae_pred = ae.predict(X_test)
-        ae_proba = ae.predict_proba(X_test)[:, 1]
-        ae_metrics = classification_report(y_test, ae_pred, ae_proba)
-        results["autoencoder"] = ae_metrics["value"].to_dict()
-        _save_model(ae, "autoencoder")
-        for k, v in results["autoencoder"].items():
-            mlflow.log_metric(f"ae_{k}", v)
-        logger.info("Autoencoder metrics:\n%s", ae_metrics)
-
-        # Ensemble
-        logger.info("Training Stacking Ensemble")
-        ens = StackingEnsemble(ae_params={"epochs": 50, "batch_size": 128, "device": "cpu"})
-        ens.fit(X_train, y_train, X_cal=X_test, y_cal=y_test)
-        ens_pred = ens.predict(X_test)
-        ens_proba = ens.predict_proba(X_test)[:, 1]
-        ens_metrics = classification_report(y_test, ens_pred, ens_proba)
-        results["ensemble"] = ens_metrics["value"].to_dict()
-        _save_model(ens, "ensemble")
-        for k, v in results["ensemble"].items():
-            mlflow.log_metric(f"ens_{k}", v)
-        logger.info("Ensemble metrics:\n%s", ens_metrics)
-
-        # Feature importance (LightGBM)
-        importances = pd.Series(
-            lgbm._model.feature_importances_,
-            index=lgbm.feature_names,
-        ).sort_values(ascending=False)
-        importances.head(20).to_csv(MODELS_DIR / "top20_feature_importance.csv")
 
         logger.info("=== Final Results ===")
         for model_name, m in results.items():

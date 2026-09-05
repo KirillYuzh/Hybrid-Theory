@@ -5,7 +5,7 @@ import pandas as pd
 
 def validate_file_exists(path: Path) -> None:
     if not path.exists():
-        raise FileNotFoundError(f"Файл не найден: {path}")
+        raise FileNotFoundError(f"File not found: {path}")
 
 
 def validate_columns(df: pd.DataFrame, required: list[str], source: str) -> None:

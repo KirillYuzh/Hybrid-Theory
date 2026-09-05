@@ -25,7 +25,7 @@ def test_extract_base_features_shape():
     df = _make_tx_df(30)
     result = extract_base_features(df)
     assert result.shape[0] == 1
-    assert result.shape[1] == 165
+    assert result.shape[1] == 168
 
 
 def test_extract_base_features_empty_df():
@@ -40,7 +40,7 @@ def test_extract_base_features_two_addresses():
     df = pd.concat([df1, df2], ignore_index=True)
     result = extract_base_features(df)
     assert result.shape[0] == 2
-    assert result.shape[1] == 165
+    assert result.shape[1] == 168
 
 
 def test_extract_behavioral_features_shape():
@@ -61,9 +61,9 @@ def test_feature_engineer_fit_transform():
     fe = FeatureEngineer()
     result = fe.fit_transform(df)
     assert result.shape[0] == 1
-    assert result.shape[1] == 191
-    assert fe.n_features == 191
-    assert len(fe.feature_names) == 191
+    assert result.shape[1] == 194
+    assert fe.n_features == 194
+    assert len(fe.feature_names) == 194
 
 
 def test_feature_engineer_transform_before_fit():
@@ -79,4 +79,4 @@ def test_feature_engineer_fit_then_transform():
     fe.fit(df)
     result = fe.transform(df)
     assert result.shape[0] == 1
-    assert result.shape[1] == 191
+    assert result.shape[1] == 194

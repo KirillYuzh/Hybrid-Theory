@@ -1,16 +1,7 @@
-from __future__ import annotations
-
-from typing import Self
-
 import pandas as pd
 
 from kyt_engine.features.base import extract_base_features
 from kyt_engine.features.behavioral import extract_behavioral_features
-
-# Подсчитано: base.py:_NUM_BASE_FEATURES + behavioral.py:_NUM_BEHAVIORAL_FEATURES
-_BASE_COUNT = 165
-_BEHAVIORAL_COUNT = 26
-_TOTAL_COUNT = _BASE_COUNT + _BEHAVIORAL_COUNT
 
 
 class FeatureEngineer:
@@ -19,7 +10,7 @@ class FeatureEngineer:
         self._feature_names: list[str] = []
         self._global_gas_median: float = 0.0
 
-    def fit(self, df: pd.DataFrame) -> Self:
+    def fit(self, df: pd.DataFrame):
         self._global_gas_median = float(df["gas_price"].median())
         sample = extract_base_features(df)
         behavioral = extract_behavioral_features(df, self._global_gas_median)
