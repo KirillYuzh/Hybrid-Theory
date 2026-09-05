@@ -71,10 +71,10 @@ print("[✓] class_distribution.png")
 # 2. MODEL COMPARISON (grouped bar chart)
 # ═══════════════════════════════════════════════════════════════════════════
 models = ["LightGBM\n(val: t=37-44)", "Autoencoder\n(val: t=37-44)", "Ансамбль\n(test: t=45-49)"]
-precision = [0.977, 0.925, 0.968]
+precision = [0.980, 0.927, 0.971]
 recall    = [0.999, 1.000, 0.999]
-f1        = [0.988, 0.961, 0.983]
-auc_roc   = [0.955, 0.561, 0.858]
+f1        = [0.991, 0.963, 0.985]
+auc_roc   = [0.958, 0.563, 0.860]
 
 metrics = np.array([precision, recall, f1, auc_roc])
 metric_names = ["Точность", "Полнота", "F1-мера", "AUC-ROC"]

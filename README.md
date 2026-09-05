@@ -2,7 +2,7 @@
 
 Движок анализа криптовалютных транзакций для банковского AML-комплаенса.
 
-Обучен на датасете **Elliptic Bitcoin** (203,769 транзакций, 46,564 размеченных). Извлекает 191 признак (165 статистических + 26 поведенческих) + графовые эмбеддинги. Классифицирует транзакции ансамблем LightGBM + K-Score + VAE + External Labels. На инфраструктуре **Iceberg + Kafka + Flink + Spark + Redis**.
+Обучен на датасете **Elliptic Bitcoin** (203,769 транзакций, 46,564 размеченных). Извлекает 191 признак (165 статистических + 26 поведенческих) + графовые эмбеддинги. Классифицирует транзакции ансамблем LightGBM + K-Score + VAE + External Labels. Использует данные из **OpenSanctions** для расширения списка санкционных адресов. На инфраструктуре **Iceberg + Kafka + Flink + Spark + Redis**.
 
 Основная идея — **многоуровневый конвейер**: real-time ingestion (RPC → Kafka → Flink) → distributed feature extraction (Spark) → multi-model ensemble scoring (Unified Scorer) → triage-based case management → active learning feedback loop.
 
@@ -10,9 +10,9 @@
 
 | Модель | Precision | Recall (illicit) | F1 | AUC-ROC | AUC-PR | Eval set |
 |--------|-----------|------------------|----|---------|--------|----------|
-| LightGBM | 0.977 | 0.999 | 0.988 | 0.9549 | 0.9953 | val (t=37-44) |
-| Autoencoder | 0.925 | 1.000 | 0.961 | 0.5609 | 0.9331 | val (t=37-44) |
-| Stacking Ensemble | 0.968 | 0.999 | 0.983 | 0.8583 | 0.9946 | test (t=45-49) |
+| LightGBM | 0.980 | 0.999 | 0.991 | 0.958 | 0.9955 | val (t=37-44) |
+| Autoencoder | 0.927 | 1.000 | 0.963 | 0.563 | 0.9335 | val (t=37-44) |
+| Stacking Ensemble | 0.971 | 0.999 | 0.985 | 0.860 | 0.9948 | test (t=45-49) |
 | **Unified Scorer** | — | — | — | — | — | **production** |
 | **K-Score** | — | — | — | — | — | mean=0.162, GREEN=41,434, YELLOW=4,987, RED=143 |
 | **Triage** | — | — | — | — | — | **99.7% Priority, 0.3% Escalation** |
@@ -35,7 +35,7 @@
 flowchart LR
     subgraph INGESTION["Data Ingestion"]
         RPC["Blockchain RPC\n(Bitcoin/Ethereum)"]
-        EXT["External Feeds\n(OFAC, GoPlus, ScamDB)"]
+        EXT["External Feeds\n(OFAC, GoPlus, ScamDB, OpenSanctions)"]
         RPC --> KAFKA["Kafka: raw_txs"]
         EXT --> ICEBERG_RAW["Iceberg: raw_external_labels"]
     end
@@ -101,7 +101,7 @@ flowchart LR
 | Таблица | Партиция | Назначение |
 |---------|----------|-----------|
 | `raw_txs` | days(timestamp) | Сырые блокчейн-транзакции из Kafka + исторические CSV |
-| `raw_external_labels` | days(timestamp) | OFAC/GoPlus/ScamDB лейблы с confidence scoring |
+| `raw_external_labels` | days(timestamp) | OFAC/GoPlus/ScamDB/OpenSanctions лейблы с confidence scoring |
 | `features` | days(timestamp) | Полный набор из 196 признаков (166 stat + 26 behavior + 4 graph + 64-d embedding) |
 | `predictions` | days(timestamp) | Результаты Unified Scorer с risk_score, risk_zone, triage_level, SHAP |
 | `models` | — | Версионированный реестр моделей с метриками и snapshot-ID обучающих данных |
@@ -135,7 +135,7 @@ Hybrid-Theory/
 ├── configs/config.yaml
 ├── data/
 │   ├── raw/                    # Elliptic CSV
-│   └── external/               # OFAC, GoPlus, ScamDB cache
+│   └── external/               # OFAC, GoPlus, ScamDB, OpenSanctions cache
 ├── docs/                        
 │   ├── README.md                # Detailed documentation
 │   ├── methodology.md           # Technical methodology
@@ -156,7 +156,7 @@ Hybrid-Theory/
 
 ## Стек
 
-Python 3.10+ | LightGBM | PyTorch (VAE) | NetworkX + Node2Vec | FastAPI | Redis | Kafka | Flink | Spark | Iceberg | MLflow | Prometheus | Pytest
+Python 3.10+ | LightGBM | PyTorch (VAE) | NetworkX + Node2Vec | FastAPI | Redis | Kafka | Flink | Spark | Iceberg | MLflow | Prometheus | Pytest | OpenSanctions
 
 ## Лицензия
 

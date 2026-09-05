@@ -567,3 +567,27 @@ Temporal Graph Network (TGN) — ресурсоёмкая модель. При �
 2. Запросить комментарии юридического департамента
 3. Запланировать встречу с Chief Compliance Officer
 4. Подготовить заявление в Росфинмониторинг
+
+## 6. OpenSanctions Data Risks
+
+### 6.1. Актуальность данных (Data Freshness)
+- **Риск**: Датасет OpenSanctions обновляется hourly; текущий час может не быть доступен еще
+- **Смятие**: Кэш инициализируется из ранее scraped внешних меток; fallback к последнемуKnownGood timestamp
+- **Влияние**: Модели работают с последknown данными; задержка в 1 hour максимум
+
+#### 6.2. Покрытие адресов (Address Coverage)
+- **Риск**: Из 1.2M+ сущностей OpenSanctions извлечено 148 крипопо кошельков (CryptoWallet schema)
+- **Смятие**: Features применяются только к адресам, matching `0x...` (Ethereum) или `bc1...` (Bitcoin) паттерны; risk_score defaults to 0.5 для unknown addresses
+- **Влияние**: 148/1.2M ≈ 0.012% от сущностей; но эти 148 address имеют высокий risk_score (0.7 default), обеспечивая значимый сигнал
+
+#### 6.3. Ложные срабатывания (False Positives)
+- **Риск**: Легитимные адреса могут совпасть с OpenSanctions паттернами по совору
+- **Смятие**: Confidence-weighted integration (0.7 weight, а не hard exclusion); Unified Scorer комбинирует с 3 другими сигналами (LGBM 0.50, K-Score 0.20, VAE 0.15), смяляя эффект любого одиночного ложного срабатывания
+
+#### 6.4. Предвзятость датасета (Dataset Bias)
+- **Риск**: OpenSanctions фокусируется на санкционированных сущностях; может не покрывать все паттерны нелегальной активности
+- **Смятие**: External signal является лишь 0.15 от 4-signal Unified Scorer; другие сигналы (LGBM 0.50, K-Score 0.20, VAE 0.15) обеспечивают broader coverage
+
+#### 6.5. Temporal Drift
+- **Риск**: Temporal split (t=37-44 val, t=45-49 test) может обнаружить drift, если OpenSanctions dataset significantly обновляется между валидацией и тестированием
+- **Смятие**: Hourly refresh cycle ensures data doesn't change drastically within evaluation windows; temporal split all same hour (t=20260905xxx)

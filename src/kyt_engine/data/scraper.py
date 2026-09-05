@@ -8,7 +8,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Optional, List
 
 import pandas as pd
 
@@ -31,6 +31,7 @@ class LabeledAddress:
 CONFIDENCE_WEIGHTS: dict[str, float] = {
     "ethereum_lists": 0.8,
     "open_source": 0.5,
+    "opensanctions": 0.7,
 }
 
 DEFAULT_CONFIDENCE = 0.5
@@ -70,165 +71,105 @@ def _extract_eth_addresses(text: str) -> list[str]:
     return pattern.findall(text)
 
 
-class EthereumListsScraper:
-    """Ethereum Lists — phishing and scam addresses from GitHub repository."""
+class OpenSanctionsScraper:
+    """OpenSanctions — sanctions, PEP and regulatory data source.
 
-    URLS = [
-        "https://raw.githubusercontent.com/ethereum-lists/kservices/main/metadata/ETH/phishing-hosts.json",
-        "https://raw.githubusercontent.com/ethereum-lists/kservices/main/metadata/ETH/spam-hosts.json",
-    ]
+    Fetches CryptoWallet addresses from the OpenSanctions default dataset,
+    which includes wallets associated with sanctioned entities, fraud,
+    and illicit activity. Source: https://www.opensanctions.org/datasets/default/
+    """
 
-    def fetch(self) -> list[LabeledAddress]:
-        all_addresses: list[LabeledAddress] = []
-        now = datetime.now(timezone.utc).isoformat()
+    CSV_URL = "https://data.opensanctions.org/artifacts/default/{timestamp}-kfx/targets.simple.csv"
 
-        for url in self.URLS:
+    def __init__(self, timeout: int = 60):
+        self.timeout = timeout
+
+    def fetch(self) -> List[LabeledAddress]:
+        """Fetch OpenSanctions CryptoWallet data.
+
+        Tries the most recent available timestamp by checking the dataset
+        index, then falls back to guessing recent hourly timestamps.
+        """
+        import urllib.request, re as re_mod
+        # Try fetching the index to find the most recent timestamp
+        try:
+            idx_url = "https://data.opensanctions.org/datasets/latest/default/index.json"
+            with urllib.request.urlopen(idx_url, timeout=self.timeout) as resp:
+                idx_data = resp.read().decode("utf-8", errors="replace")
+            idx = json.loads(idx_data)
+            # Extract timestamp from resource URLs
+            for resource in idx.get("resources", []):
+                full_url = resource.get("url", "")
+                m = re_mod.search(r"(\d{14})-kfx", full_url)
+                if m:
+                    alt_ts = m.group(1)
+                    csv_url = self.CSV_URL.format(timestamp=alt_ts)
+                    try:
+                        with urllib.request.urlopen(
+                            csv_url, timeout=self.timeout
+                        ) as csv_resp:
+                            csv_text = csv_resp.read().decode("utf-8", errors="replace")
+                            return self._extract_crypto_addresses(csv_text)
+                    except Exception as e:
+                        logger.warning(
+                            "OpenSanctions CSV fetch failed for %s: %s", alt_ts, e
+                        )
+        except Exception as e:
+            logger.warning("OpenSanctions index fetch failed: %s", e)
+
+        # Fallback: try guessing recent timestamps (current hour + previous hours)
+        from datetime import datetime, timezone, timedelta
+
+        now = datetime.now(timezone.utc)
+        for hours_ago in range(0, 5):
+            ts = (now - timedelta(hours=hours_ago)).strftime("%Y%m%d%H%M%S")
+            csv_url = self.CSV_URL.format(timestamp=ts)
             try:
-                raw = _cached_fetch(url, max_age_hours=12, timeout=15)
-                data = json.loads(raw)
-            except Exception as e:
-                logger.warning("EthereumLists fetch failed for %s: %s", url, e)
+                with urllib.request.urlopen(csv_url, timeout=self.timeout) as csv_resp:
+                    csv_text = csv_resp.read().decode("utf-8", errors="replace")
+                    return self._extract_crypto_addresses(csv_text)
+            except Exception:
                 continue
 
-            items = data if isinstance(data, list) else data.get("addresses", [])
-            for entry in items:
-                if isinstance(entry, dict):
-                    addr = entry.get("address", entry.get("id", ""))
-                elif isinstance(entry, str):
-                    addr = entry
-                else:
-                    continue
+        return []
+
+    @staticmethod
+    def _extract_crypto_addresses(csv_text: str) -> List[LabeledAddress]:
+        """Extract crypto wallet addresses from OpenSanctions CSV."""
+        import csv as csv_mod
+        address_pattern = re.compile(r"\b0x[0-9a-fA-F]{40}\b|\bc1[qp][0-9a-z]{39,81}\b")
+        addresses: List[LabeledAddress] = []
+        lines = csv_text.strip().split("\n")
+        if not lines:
+            return addresses
+        for line in lines[1:]:
+            if not line.strip():
+                continue
+            fields = csv_mod.reader([line]).__next__()
+            # Schema: id,name,aliases,birth_date,countries,addresses,identifiers,sanctions,...
+            addr_field = fields[6] if len(fields) > 6 else ""
+            ident_field = fields[7] if len(fields) > 7 else ""
+            # Use identifiers as the address if available, otherwise addresses
+            candidate = ident_field.strip() if ident_field else addr_field.strip()
+            if not candidate:
+                continue
+            # Extract all matching addresses from the field
+            for match in address_pattern.finditer(candidate):
+                addr = match.group(0)
                 if addr.startswith("0x"):
-                    all_addresses.append(
-                        LabeledAddress(
-                            address=addr,
-                            label="illicit",
-                            source="ethereum_lists",
-                            timestamp=now,
-                            category="phishing",
-                        )
+                    cat = "sanctions"
+                else:
+                    cat = "scam"
+                addresses.append(
+                    LabeledAddress(
+                        address=addr.lower(),
+                        label="illicit",
+                        source="opensanctions",
+                        timestamp=datetime.now(timezone.utc).isoformat(),
+                        category=cat,
                     )
-
-        logger.info("EthereumLists: fetched %d addresses", len(all_addresses))
-        return all_addresses
-
-
-class GitHubAddressesScraper:
-    """Scraping addresses from GitHub ethereum-lists (upd: urls darklist).
-
-    Source: https://github.com/ethereum-lists/urls
-    Contains known-scam addresses in URL format.
-    """
-    DARKLIST_URL = "https://raw.githubusercontent.com/ethereum-lists/urls/master/urls-darklist.json"
-
-    def fetch(self) -> list[LabeledAddress]:
-        all_addresses: list[LabeledAddress] = []
-        now = datetime.now(timezone.utc).isoformat()
-
-        try:
-            raw = _cached_fetch(self.DARKLIST_URL, max_age_hours=24, timeout=30)
-            data = json.loads(raw)
-        except Exception as e:
-            logger.warning("GitHubAddressesScraper fetch failed: %s", e)
-            return all_addresses
-
-        if isinstance(data, list):
-            for entry in data:
-                if isinstance(entry, str):
-                    # URLs-darklist can contain full URLs or just addresses
-                    # Extract 0x... addresses
-                    addrs = re.findall(r"\b0x[0-9a-fA-F]{40}\b", entry)
-                    for addr in addrs:
-                        all_addresses.append(
-                            LabeledAddress(
-                                address=addr,
-                                label="illicit",
-                                source="open_source",
-                                timestamp=now,
-                                category="scam",
-                            )
-                        )
-                elif isinstance(entry, dict):
-                    addr = entry.get("address", entry.get("id", ""))
-                    if addr.startswith("0x"):
-                        all_addresses.append(
-                            LabeledAddress(
-                                address=addr.lower(),
-                                label="illicit",
-                                source="open_source",
-                                timestamp=now,
-                                category="scam",
-                            )
-                        )
-
-        logger.info("GitHubAddresses: fetched %d addresses", len(all_addresses))
-        return all_addresses
-
-
-class ExternalLabelStore:
-    """Manages the external labels database. Merges labels from multiple sources."""
-
-    PRIORITY = {"ethereum_lists": 2, "open_source": 1}
-
-    def __init__(self, storage_dir: Optional[Path] = None):
-        self._dir = storage_dir or DATA_DIR
-        self._dir.mkdir(parents=True, exist_ok=True)
-
-    def merge(self, all_labels: list[LabeledAddress]) -> pd.DataFrame:
-        if not all_labels:
-            return pd.DataFrame(
-                columns=["address", "label", "source", "timestamp", "category"]
-            )
-
-        rows = []
-        for lbl in all_labels:
-            rows.append(
-                {
-                    "address": lbl.address.lower(),
-                    "label": lbl.label,
-                    "source": lbl.source,
-                    "timestamp": lbl.timestamp,
-                    "category": lbl.category,
-                    "priority": self.PRIORITY.get(lbl.source, 0),
-                }
-            )
-
-        df = pd.DataFrame(rows)
-        df = df.sort_values("priority", ascending=False)
-        df = df.drop_duplicates(subset=["address"], keep="first")
-        df = df.drop(columns=["priority"])
-        df = df.reset_index(drop=True)
-        return df
-
-    def save(self, df: pd.DataFrame) -> Path:
-        ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-        path = self._dir / f"external_labels_{ts}.parquet"
-        df.to_parquet(path, index=False)
-        return path
-
-    def load(self) -> pd.DataFrame:
-        parquets = sorted(self._dir.glob("external_labels_*.parquet"))
-        if not parquets:
-            return pd.DataFrame(
-                columns=["address", "label", "source", "timestamp", "category"]
-            )
-        return pd.read_parquet(parquets[-1])
-
-    def get_illicit_addresses(self) -> set[str]:
-        df = self.load()
-        if df.empty:
-            return set()
-        return set(df.loc[df["label"] == "illicit", "address"])
-
-    def get_statistics(self) -> dict:
-        df = self.load()
-        if df.empty:
-            return {"total": 0, "by_source": {}, "by_label": {}}
-        return {
-            "total": len(df),
-            "by_source": df["source"].value_counts().to_dict(),
-            "by_label": df["label"].value_counts().to_dict(),
-        }
+                )
+        return addresses
 
 
 class Scraper:
@@ -238,7 +179,7 @@ class Scraper:
 
     def __init__(self, sources: Optional[list] = None):
         if sources is None:
-            self._sources = [EthereumListsScraper(), GitHubAddressesScraper()]
+            self._sources = [OpenSanctionsScraper()]
         else:
             self._sources = sources
 
@@ -338,7 +279,7 @@ class Scraper:
 
 def run_full_scrape() -> pd.DataFrame:
     """Run all scrapers and save merged results."""
-    scrapers = [EthereumListsScraper(), GitHubAddressesScraper()]
+    scrapers = [OpenSanctionsScraper()]
     all_labels: list[LabeledAddress] = []
     for s in scrapers:
         try:
@@ -353,3 +294,69 @@ def run_full_scrape() -> pd.DataFrame:
     path = store.save(df)
     logger.info("Saved %d external labels to %s", len(df), path)
     return df
+
+
+class ExternalLabelStore:
+    """Manages the external labels database. Merges labels from multiple sources."""
+
+    PRIORITY = {"ethereum_lists": 2, "open_source": 1, "opensanctions": 3}
+
+    def __init__(self, storage_dir: Optional[Path] = None):
+        self._dir = storage_dir or DATA_DIR
+        self._dir.mkdir(parents=True, exist_ok=True)
+
+    def merge(self, all_labels: list[LabeledAddress]) -> pd.DataFrame:
+        if not all_labels:
+            return pd.DataFrame(
+                columns=["address", "label", "source", "timestamp", "category"]
+            )
+
+        rows = []
+        for lbl in all_labels:
+            rows.append(
+                {
+                    "address": lbl.address.lower(),
+                    "label": lbl.label,
+                    "source": lbl.source,
+                    "timestamp": lbl.timestamp,
+                    "category": lbl.category,
+                    "priority": self.PRIORITY.get(lbl.source, 0),
+                }
+            )
+
+        df = pd.DataFrame(rows)
+        df = df.sort_values("priority", ascending=False)
+        df = df.drop_duplicates(subset=["address"], keep="first")
+        df = df.drop(columns=["priority"])
+        df = df.reset_index(drop=True)
+        return df
+
+    def save(self, df: pd.DataFrame) -> Path:
+        ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        path = self._dir / f"external_labels_{ts}.parquet"
+        df.to_parquet(path, index=False)
+        return path
+
+    def load(self) -> pd.DataFrame:
+        parquets = sorted(self._dir.glob("external_labels_*.parquet"))
+        if not parquets:
+            return pd.DataFrame(
+                columns=["address", "label", "source", "timestamp", "category"]
+            )
+        return pd.read_parquet(parquets[-1])
+
+    def get_illicit_addresses(self) -> set[str]:
+        df = self.load()
+        if df.empty:
+            return set()
+        return set(df.loc[df["label"] == "illicit", "address"])
+
+    def get_statistics(self) -> dict:
+        df = self.load()
+        if df.empty:
+            return {"total": 0, "by_source": {}, "by_label": {}}
+        return {
+            "total": len(df),
+            "by_source": df["source"].value_counts().to_dict(),
+            "by_label": df["label"].value_counts().to_dict(),
+        }

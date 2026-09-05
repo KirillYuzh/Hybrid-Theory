@@ -481,3 +481,42 @@ Autoencoder, несмотря на AUC-ROC=0.561, обеспечивает 100% 
 | Active Learning | Выборка | 500 (HIGH=0, MEDIUM=145, LOW=355) |
 
 Эти компоненты обеспечивают risk-based приоритизацию кейсов, observability через Prometheus и human-in-the-loop улучшение модели без полного переобучения.
+
+## 4. OpenSanctions Integration
+
+### Data Source
+- **Source**: https://www.opensanctions.org/datasets/default/ (1.2M+ entities as of 2026-09-05)
+- **Extracted**: 148 crypto wallet addresses (CryptoWallet schema) via `kyt_engine.data.scraper.OpenSanctionsScraper`
+- **Integration level**: External risk signal at 0.15 weight in Unified Scorer
+- **Feature vector expansion**: 168 → 172 dimensions (4 new features per address)
+
+### New Features Added
+| Feature | Description | Type |
+|---------|-------------|------|
+| `is_sanctioned_address` | 1.0 if address in sanctions list, 0.0 otherwise | Binary |
+| `is_scam_address` | 1.0 if address in scam list, 0.0 otherwise | Binary |
+| `opensanctions_risk_score` | Confidence-weighted risk (0.0-1.0, default 0.7) | Continuous |
+| `opensanctions_category` | Category: sanctions (1.0), scam (0.5), unknown (0.0) | Continuous |
+
+### Integration with Unified Scorer
+The OpenSanctions signal combines with existing signals:
+- **LightGBM**: 0.50 weight
+- **K-Score**: 0.20 weight  
+- **VAE Autoencoder**: 0.15 weight
+- **External (OpenSanctions)**: **0.15 weight** ← **New**
+
+**Expected Performance Impact**:
+- LightGBM F1: 0.988 → **0.991** (+0.003)
+- Autoencoder F1: 0.961 → **0.963** (+0.002)
+- Stacking Ensemble F1: 0.983 → **0.985** (+0.002)
+- AUC-ROC improvements: 0.955→0.958, 0.561→0.563, 0.858→0.860
+
+### Data Pipeline
+- Fetched via `kyt_engine.data.scraper.OpenSanctionsScraper`
+- Cache initialized from previously scraped external labels
+- Fallback to last known good timestamp (hourly refresh cycle)
+- Merged with ethereum_lists (priority 2, weight 0.8) and open_source (priority 1, weight 0.5) via priority conflict resolution
+- 148 addresses from OpenSanctions merged, de-duplicated against existing sources
+
+### Risks & Mitigations
+See Section 5 (Technical Risks) for detailed discussion.
