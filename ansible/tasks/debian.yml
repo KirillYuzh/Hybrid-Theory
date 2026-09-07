@@ -15,5 +15,78 @@
     name:
       - kyt-engine
       - pytest
+      - mlflow
+      - shap
+      - scikit-learn
     extra_args: "--quiet"
   when: ansible_facts['python_facts']['is_msie'] | bool | not
+
+- name: Ensure data directories exist
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    mode: "0755"
+  loop:
+    - "{{ kyt_engine.data_dir }}"
+    - "{{ kyt_engine.model_dir }}"
+    - "/opt/kyt-engine/data/raw"
+    - "/opt/kyt-engine/shap_plots"
+
+- name: Load Bitcoin (Elliptic) dataset
+  ansible.builtin.command: >
+    cd /opt/kyt-engine && python3 -c
+    "from kyt_engine.training.train import _load_data;
+     df, y = _load_data(blockchains=['bitcoin']);
+     print(f'Bitcoin: {len(df)} samples')"
+    creates: "{{ kyt_engine.data_dir }}/bitcoin_loaded.flag"
+    when: kyt_engine_blockchains | contains('bitcoin') and not kyt_engine_load_all | bool
+
+- name: Load Ethereum dataset
+  ansible.builtin.command: >
+    cd /opt/kyt-engine && python3 -c
+    "from kyt_engine.data.ethereum import load_ethereum_dataset;
+     df = load_ethereum_dataset('data/raw')['transactions'];
+     print(f'Ethereum: {df.shape}')"
+    creates: "{{ kyt_engine.data_dir }}/ethereum_loaded.flag"
+    when: kyt_engine_blockchains | contains('ethereum') and not kyt_engine_load_all | bool
+
+- name: Load StableAML dataset
+  ansible.builtin.command: >
+    cd /opt/kyt-engine && python3 -c
+    "from kyt_engine.data.stableaml import load_stableaml_dataset;
+     df = load_stableaml_dataset('data/raw')['transactions'];
+     print(f'StableAML: {df.shape}')"
+    creates: "{{ kyt_engine.data_dir }}/stableaml_loaded.flag"
+    when: kyt_engine_blockchains | contains('stableml') and not kyt_engine_load_all | bool
+
+- name: Load OpenAML dataset
+  ansible.builtin.command: >
+    cd /opt/kyt-engine && python3 -c
+    "from kyt_engine.data.openaml import load_openml_dataset;
+     df = load_openml_dataset('data/raw')['transactions'];
+     print(f'OpenAML: {df.shape}')"
+    creates: "{{ kyt_engine.data_dir }}/openml_loaded.flag"
+    when: kyt_engine_blockchains | contains('openml') and not kyt_engine_load_all | bool
+
+- name: Load all blockchains datasets
+  ansible.builtin.command: >
+    cd /opt/kyt-engine && python3 -c
+    "from kyt_engine.training.train import _load_data;
+     df, y = _load_data(blockchains=None);
+     print(f'Total: {len(df)} samples from multiple blockchains')"
+    creates: "{{ kyt_engine.data_dir }}/all_chains_loaded.flag"
+    when: kyt_engine_load_all | bool
+
+- name: Run multi-blockchain training pipeline
+  ansible.builtin.command: >
+    cd /opt/kyt-engine && python3 -m kyt_engine.training
+    --blockchains bitcoin,ethereum,stableml,openml
+    creates: "{{ kyt_engine.model_dir }}/multi_chain_model.pkl"
+    when: not kyt_engine_load_all | bool
+
+- name: Run full multi-blockchain training
+  ansible.builtin.command: >
+    cd /opt/kyt-engine && python3 -m kyt_engine.training
+    --blockchains all
+    creates: "{{ kyt_engine.model_dir }}/multi_chain_model_full.pkl"
+    when: kyt_engine_load_all | bool

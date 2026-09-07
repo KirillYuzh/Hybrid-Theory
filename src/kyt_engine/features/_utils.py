@@ -5,7 +5,8 @@ from scipy import stats as sp_stats
 
 
 def prepare_features(
-    X: pd.DataFrame, y: pd.Series | None = None
+    X: pd.DataFrame,
+    y: pd.Series | None = None,
 ) -> tuple[pd.DataFrame, pd.Series | None]:
     df = X.replace([np.inf, -np.inf], np.nan).fillna(0.0)
     target = y.copy() if y is not None else None
@@ -13,7 +14,9 @@ def prepare_features(
 
 
 def find_best_threshold(
-    proba: np.ndarray, y_true: np.ndarray, step: float = 0.01
+    proba: np.ndarray,
+    y_true: np.ndarray,
+    step: float = 0.01,
 ) -> float:
     best_t, best_f1 = 0.5, 0.0
     for t in np.arange(0.1, 0.9, step):
@@ -58,23 +61,3 @@ def discretized_entropy(values: np.ndarray, bins: int = 20) -> float:
     counts = np.bincount(np.digitize(values, edges))
     probs = counts[counts > 0] / float(counts.sum())
     return float(-np.sum(probs * np.log2(probs + 1e-12)))
-
-
-def safe_float(v) -> float:
-    try:
-        return float(v)
-    except (TypeError, ValueError):
-        return 0.0
-
-
-def safe_skew(v: np.ndarray) -> float:
-    return float(sp_stats.skew(v, bias=False))
-
-
-def safe_kurtosis(v: np.ndarray) -> float:
-    return float(sp_stats.kurtosis(v, bias=False))
-
-
-def safe_linregress(x: np.ndarray, y: np.ndarray) -> tuple[float, float]:
-    res = sp_stats.linregress(x, y)
-    return float(res.slope), float(res.rvalue) ** 2

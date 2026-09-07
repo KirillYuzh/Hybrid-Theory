@@ -72,7 +72,8 @@ def _extract_eth_addresses(text: str) -> list[str]:
 
 
 class OpenSanctionsScraper:
-    """OpenSanctions — sanctions, PEP and regulatory data source.
+    """
+    OpenSanctions — sanctions, PEP and regulatory data source
 
     Fetches CryptoWallet addresses from the OpenSanctions default dataset,
     which includes wallets associated with sanctioned entities, fraud,
@@ -85,7 +86,8 @@ class OpenSanctionsScraper:
         self.timeout = timeout
 
     def fetch(self) -> List[LabeledAddress]:
-        """Fetch OpenSanctions CryptoWallet data.
+        """
+        Fetch OpenSanctions CryptoWallet data
 
         Tries the most recent available timestamp by checking the dataset
         index, then falls back to guessing recent hourly timestamps.
@@ -135,7 +137,9 @@ class OpenSanctionsScraper:
 
     @staticmethod
     def _extract_crypto_addresses(csv_text: str) -> List[LabeledAddress]:
-        """Extract crypto wallet addresses from OpenSanctions CSV."""
+        """
+        Extract crypto wallet addresses from OpenSanctions CSV
+        """
         import csv as csv_mod
         address_pattern = re.compile(r"\b0x[0-9a-fA-F]{40}\b|\bc1[qp][0-9a-z]{39,81}\b")
         addresses: List[LabeledAddress] = []
@@ -173,7 +177,9 @@ class OpenSanctionsScraper:
 
 
 class Scraper:
-    """Unified source of external labels with confidence weights and conflict resolution."""
+    """
+    Unified source of external labels with confidence weights and conflict resolution
+    """
 
     confidence_weights: dict[str, float] = CONFIDENCE_WEIGHTS
 

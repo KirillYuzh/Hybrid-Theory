@@ -46,3 +46,41 @@ kyt_engine_audit:
   db_name: "kyt_audit"
   db_user: "kyt_user"
   db_password: "{{ ansible_secrets.get('POSTGRES_PASSWORD', 'change-me') }}"
+
+# Multi-blockchain data configuration
+kyt_engine_blockchains:
+  - bitcoin
+  - ethereum
+  - stableml
+  - openml
+kyt_engine_load_all: false  # Set to true to load all blockchains during deployment
+
+# Data source configuration per blockchain
+kyt_engine_data_sources:
+  bitcoin:
+    source: "elliptic_dataset"
+    path: "/opt/kyt-engine/data/raw/elliptic"
+  ethereum:
+    source: "synthetic_ethereum"
+    path: "/opt/kyt-engine/data/raw/ethereum_txs.parquet"
+  stableml:
+    source: "synthetic_stableaml"
+    path: "/opt/kyt-engine/data/raw/stableaml_txs.parquet"
+  openml:
+    source: "synthetic_openaml"
+    path: "/opt/kyt-engine/data/raw/openaml_txs.parquet"
+
+# Explainability (SHAP) configuration
+kyt_engine_shap:
+  enabled: true
+  background_samples: 100
+  max_samples: 100
+  save_plots: true
+  plot_dir: "/opt/kyt-engine/shap_plots"
+
+# Drift detection configuration
+kyt_engine_drift:
+  enabled: true
+  psi_threshold: 0.1
+  monitoring_window: 1000
+  retrain_trigger: "auc_pr_drop_0.02"

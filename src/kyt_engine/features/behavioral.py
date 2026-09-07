@@ -6,7 +6,6 @@ from kyt_engine.features._utils import (
     counting_entropy,
     discretized_entropy,
     extract_counterparties,
-    safe_float,
 )
 
 

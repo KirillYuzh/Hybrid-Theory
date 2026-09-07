@@ -1,5 +1,6 @@
 import numpy as np
 import pandas as pd
+from sklearn.model_selection import StratifiedKFold
 from sklearn.linear_model import LogisticRegression
 
 from kyt_engine.features._utils import find_best_threshold, prepare_features
@@ -30,8 +31,7 @@ class StackingEnsemble:
         self,
         lgbm_proba: np.ndarray,
     ) -> np.ndarray:
-        lgbm_stack = lgbm_proba[:, 1] if lgbm_proba.ndim == 2 else lgbm_proba
-        return lgbm_stack.reshape(-1, 1)
+        return lgbm_proba[:, 1].reshape(-1, 1)
 
     def fit(
         self,
@@ -44,20 +44,34 @@ class StackingEnsemble:
         self._feature_names = list(X_df.columns)
 
         self._lgbm.fit(X_df, y_s, X_cal=X_cal, y_cal=y_cal)
-        lgbm_proba = self._lgbm.predict_proba(X_df)
 
-        meta_X = self._stack_predictions(lgbm_proba)
-        self._meta.fit(meta_X, y_s.astype(int))
+        if y_cal is not None:
+            X_c, y_c = prepare_features(X_cal, y_cal)
+            cal_proba = self._lgbm.predict_proba(X_c)[:, 1]
+            self._meta.fit(self._stack_predictions(cal_proba), y_c.astype(int))
+            meta_proba = self._meta.predict_proba(self._stack_predictions(self._lgbm.predict_proba(X_df)))[:, 1]
+        else:
+            n_splits = min(5, min(y_s.value_counts()))
+            if n_splits < 2:
+                self._meta.fit(self._stack_predictions(self._lgbm.predict_proba(X_df)), y_s.astype(int))
+            else:
+                skf = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=self._lgbm._model.random_state)
+                oof_proba = np.zeros(len(y_s))
+                for train_idx, val_idx in skf.split(X_df, y_s):
+                    self._lgbm._model.fit(X_df.iloc[train_idx], y_s.iloc[train_idx].values)
+                    oof_proba[val_idx] = self._lgbm._model.predict_proba(X_df.iloc[val_idx])[:, 1]
 
-        meta_proba = self._meta.predict_proba(meta_X)[:, 1]
+                self._meta.fit(oof_proba.reshape(-1, 1), y_s.astype(int))
+
+            meta_proba = self._meta.predict_proba(self._stack_predictions(self._lgbm.predict_proba(X_df)))[:, 1]
+
         self._threshold = find_best_threshold(meta_proba, y_s.values)
         return self
 
     def predict_proba(self, X: pd.DataFrame) -> np.ndarray:
         X_df, _ = prepare_features(X)
         lgbm_proba = self._lgbm.predict_proba(X_df)
-        meta_X = self._stack_predictions(lgbm_proba)
-        return self._meta.predict_proba(meta_X)[:, 1]
+        return self._meta.predict_proba(self._stack_predictions(lgbm_proba))[:, 1]
 
     def predict(self, X: pd.DataFrame) -> np.ndarray:
         proba = self.predict_proba(X)

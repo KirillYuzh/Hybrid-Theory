@@ -55,9 +55,13 @@ class KScoreCalculator:
 
     def _score_group(self, group_features: np.ndarray, address: str) -> List[float]:
         if address not in self.baselines:
-            return [0.0] * len(group_features)
+            return [0.0] * len(group_features) if len(group_features) > 0 else []
         
         mean, std = self.baselines[address]
+        
+        if len(group_features) == 0:
+            return []
+        
         z_scores = np.abs((group_features - mean) / std)
         k_scores = np.nanmean(z_scores, axis=1)
         return np.clip(k_scores / self.norm_factor, 0.0, 1.0).tolist()

@@ -4,14 +4,20 @@ import pandas as pd
 
 from kyt_engine.data.validators import validate_columns, validate_file_exists
 
-REQUIRED_COLUMNS = ["transaction_id", "timestamp", "amount"]
+REQUIRED_COLUMNS = ["txId", "timestamp", "from_address", "to_address", "value", "label"]
+OPENAML_FILE = "openaml_txs.parquet"
 
-FILE_NAME = "openaml.parquet"
 
-
-def load_openaml(data_dir: str | Path) -> pd.DataFrame:
-    path = Path(data_dir) / FILE_NAME
+def load_openaml_data(data_dir: str | Path) -> pd.DataFrame:
+    path = Path(data_dir) / OPENAML_FILE
     validate_file_exists(path)
     df = pd.read_parquet(path)
-    validate_columns(df, REQUIRED_COLUMNS, FILE_NAME)
+    missing = set(REQUIRED_COLUMNS) - set(df.columns)
+    if missing:
+        raise ValueError(f"OpenAML data is missing required columns: {sorted(missing)}")
     return df
+
+
+def load_openaml_dataset(data_dir: str | Path) -> dict[str, pd.DataFrame]:
+    df = load_openaml_data(data_dir)
+    return {"transactions": df}

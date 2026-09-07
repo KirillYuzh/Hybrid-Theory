@@ -12,35 +12,35 @@ class VAE(nn.Module):
         super().__init__()
         self.input_dim = input_dim
         self.latent_dim = latent_dim
-        
+
         # Encoder
         self.enc1 = nn.Linear(input_dim, hidden_dim)
         self.enc2 = nn.Linear(hidden_dim, hidden_dim // 2)
         self.fc_mu = nn.Linear(hidden_dim // 2, latent_dim)
         self.fc_logvar = nn.Linear(hidden_dim // 2, latent_dim)
-        
+
         # Decoder
         self.dec1 = nn.Linear(latent_dim, hidden_dim // 2)
         self.dec2 = nn.Linear(hidden_dim // 2, hidden_dim)
         self.dec3 = nn.Linear(hidden_dim, input_dim)
-    
+
     def encode(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         h = F.relu(self.enc1(x))
         h = F.relu(self.enc2(h))
         mu = self.fc_mu(h)
         logvar = self.fc_logvar(h)
         return mu, logvar
-    
+
     def reparameterize(self, mu: torch.Tensor, logvar: torch.Tensor) -> torch.Tensor:
         std = torch.exp(0.5 * logvar)
         eps = torch.randn_like(std)
         return mu + eps * std
-    
+
     def decode(self, z: torch.Tensor) -> torch.Tensor:
         h = F.relu(self.dec1(z))
         h = F.relu(self.dec2(h))
         return self.dec3(h)
-    
+
     def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         mu, logvar = self.encode(x)
         z = self.reparameterize(mu, logvar)
@@ -52,6 +52,19 @@ def vae_loss(recon: torch.Tensor, x: torch.Tensor, mu: torch.Tensor, logvar: tor
     recon_loss = F.mse_loss(recon, x, reduction='sum')
     kl_loss = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp())
     return recon_loss + kl_loss
+
+
+def _compute_anomaly_scores(model: VAE, X_tensor: torch.Tensor) -> np.ndarray:
+    """Compute VAE anomaly scores (reconstruction error + KL divergence)."""
+    model.eval()
+    with torch.no_grad():
+        recon, mu, logvar = model(X_tensor)
+        recon_errors = torch.mean((recon - X_tensor) ** 2, dim=1).cpu().numpy()
+        kl_errors = -0.5 * np.sum(
+            1 + logvar.cpu().numpy() - mu.cpu().numpy() ** 2 - np.exp(logvar.cpu().numpy()),
+            axis=1,
+        )
+        return recon_errors + kl_errors
 
 
 class VAEDetector:
@@ -82,30 +95,26 @@ class VAEDetector:
         # Use only normal (licit) samples for training
         if y is not None:
             normal_mask = y == 0
-            if not normal_mask.any():
-                # No normal samples, use all
-                X_train = X
-            else:
-                X_train = X[normal_mask]
+            X_train = X[normal_mask] if normal_mask.any() else X
         else:
             X_train = X
-        
+
         # Prepare data
         self._feature_names = list(X.columns)
         X_scaled = self.scaler.fit_transform(X_train.to_numpy(dtype=np.float64))
-        
+
         # Create model
         input_dim = X_scaled.shape[1]
         self.model = VAE(input_dim, self.latent_dim, self.hidden_dim).to(self.device)
         optimizer = torch.optim.Adam(self.model.parameters(), lr=self.lr)
-        
+
         # Convert to tensor
         X_tensor = torch.FloatTensor(X_scaled).to(self.device)
-        
+
         # Training loop
         self.model.train()
         n_samples = X_tensor.shape[0]
-        for epoch in range(self.epochs):
+        for _ in range(self.epochs):
             epoch_loss = 0.0
             for i in range(0, n_samples, self.batch_size):
                 batch = X_tensor[i:i + self.batch_size]
@@ -115,34 +124,21 @@ class VAEDetector:
                 loss.backward()
                 optimizer.step()
                 epoch_loss += loss.item()
-        
+
         # Compute anomaly threshold on training data
-        self.model.eval()
-        with torch.no_grad():
-            recon, mu, logvar = self.model(X_tensor)
-            recon_errors = torch.mean((recon - X_tensor) ** 2, dim=1).cpu().numpy()
-            kl_errors = -0.5 * np.sum(1 + logvar.cpu().numpy() - mu.cpu().numpy() ** 2 - np.exp(logvar.cpu().numpy()), axis=1)
-            anomaly_scores = recon_errors + kl_errors
-            self.threshold = float(np.percentile(anomaly_scores, 100 * (1 - self.contamination)))
-        
+        anomaly_scores = _compute_anomaly_scores(self.model, X_tensor)
+        self.threshold = float(np.percentile(anomaly_scores, 100 * (1 - self.contamination)))
+
         self.is_fitted = True
         return self
 
     def _compute_anomaly_scores(self, X: pd.DataFrame) -> np.ndarray:
         if not self.is_fitted or self.model is None:
             raise RuntimeError("VAEDetector must be fitted before scoring")
-        
+
         X_scaled = self.scaler.transform(X.to_numpy(dtype=np.float64))
         X_tensor = torch.FloatTensor(X_scaled).to(self.device)
-        
-        self.model.eval()
-        with torch.no_grad():
-            recon, mu, logvar = self.model(X_tensor)
-            recon_errors = torch.mean((recon - X_tensor) ** 2, dim=1).cpu().numpy()
-            kl_errors = -0.5 * np.sum(1 + logvar.cpu().numpy() - mu.cpu().numpy() ** 2 - np.exp(logvar.cpu().numpy()), axis=1)
-            anomaly_scores = recon_errors + kl_errors
-        
-        return anomaly_scores
+        return _compute_anomaly_scores(self.model, X_tensor)
 
     def predict_proba(self, X: pd.DataFrame) -> np.ndarray:
         scores = self._compute_anomaly_scores(X)
@@ -156,4 +152,4 @@ class VAEDetector:
 
     @property
     def feature_names(self) -> List[str]:
-        return self._feature_names
+        return list(self._feature_names)

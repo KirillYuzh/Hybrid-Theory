@@ -3,7 +3,6 @@ from pathlib import Path
 
 import joblib
 import pandas as pd
-
 from fastapi import FastAPI, HTTPException
 
 from kyt_engine.api.schemas import HealthResponse, PredictResponse, ReasonItem, TxRequest
@@ -23,8 +22,17 @@ from kyt_engine.config import (
     EXTERNAL_WEIGHT,
 )
 
-
 AUDIT_PATH = Path(os.environ.get("KYT_AUDIT_PATH", "data/audit/decisions.jsonl"))
+MODEL_DIR = Path(os.environ.get("KYT_MODEL_DIR", "models"))
+_pipeline: Pipeline | None = None
+
+
+def _load_lightgbm_model():
+    """Load LightGBM model from disk. Raises if not found."""
+    matches = sorted(MODEL_DIR.glob("lightgbm*.pkl"))
+    if matches:
+        return joblib.load(matches[-1])
+    raise RuntimeError(f"LightGBM model not found in {MODEL_DIR}")
 
 
 def _build_pipeline() -> Pipeline:
@@ -32,23 +40,17 @@ def _build_pipeline() -> Pipeline:
     kscore_calc = KScoreCalculator()
 
     fe = FeatureEngineer()
-    dummy_df = pd.DataFrame({
-        "address": ["X"],
-        "timestamp": [0],
-        "value": [0.0],
-        "gas_price": [0.1],
-        "gas_used": [21000],
-        "block_number": [1],
-        "from_address": ["X"],
-        "to_address": ["Y"],
-    })
-    fe.fit(dummy_df)
+    fe.fit(pd.DataFrame({
+        "address": ["X"], "timestamp": [0], "value": [0.0],
+        "gas_price": [0.1], "gas_used": [21000], "block_number": [1],
+        "from_address": ["X"], "to_address": ["Y"],
+    }))
 
     lgbm_scorer = LightGBMScorer(lgbm_model, feature_names=list(fe.feature_names) if fe.feature_names else None)
     kscore_scorer = KScoreScorer(kscore_calc, feature_names=list(fe.feature_names) if fe.feature_names else [])
 
     audit = AuditLog(AUDIT_PATH)
-    scorers: list = [s for s in [lgbm_scorer, kscore_scorer] if s is not None]
+    scorers = [lgbm_scorer, kscore_scorer]
 
     return Pipeline(
         features=fe,
@@ -72,25 +74,16 @@ def _build_pipeline() -> Pipeline:
     )
 
 
-def _load_lightgbm_model() -> object:
-    """Load LightGBM model from disk. Raises if not found."""
-    model_dir = Path(os.environ.get("KYT_MODEL_DIR", "models"))
-    for name in ("lightgbm_real.pkl", "lightgbm.pkl", "lightgbm_updated_1788251370.pkl"):
-        path = model_dir / name
-        if path.exists():
-            return joblib.load(path)
-    raise RuntimeError(f"LightGBM model not found in {model_dir}")
-
-
-_pipeline: Pipeline | None = None
-
-
 def get_pipeline() -> Pipeline:
     """Get or create the pipeline. Raises if model not found."""
     global _pipeline
     if _pipeline is None:
         _pipeline = _build_pipeline()
     return _pipeline
+
+
+def _scoring_exception(exc: RuntimeError) -> HTTPException:
+    return HTTPException(status_code=503, detail=str(exc))
 
 
 app = FastAPI(title="KYT Engine API", version="0.1.0")
@@ -100,7 +93,7 @@ app = FastAPI(title="KYT Engine API", version="0.1.0")
 def health() -> HealthResponse:
     try:
         pipeline = get_pipeline()
-        models_loaded = [s.name for s in pipeline._scorers if hasattr(s, "name")]
+        models_loaded = [s.name for s in pipeline._scorers]
         status = "ok"
     except RuntimeError:
         models_loaded = []
@@ -112,8 +105,8 @@ def health() -> HealthResponse:
 def predict(tx: TxRequest) -> PredictResponse:
     try:
         pipeline = get_pipeline()
-    except RuntimeError:
-        raise HTTPException(status_code=503, detail="Model pipeline not available")
+    except RuntimeError as exc:
+        raise _scoring_exception(exc)
 
     record = TxRecord(
         tx_id=tx.tx_id,
@@ -129,8 +122,9 @@ def predict(tx: TxRequest) -> PredictResponse:
     )
     try:
         result = pipeline.score_tx(record)
-    except RuntimeError:
-        raise HTTPException(status_code=503, detail="Scoring failed")
+    except RuntimeError as exc:
+        raise _scoring_exception(exc)
+
     return PredictResponse(
         tx_id=result.tx_id,
         risk_score=round(result.risk_score, 6),
