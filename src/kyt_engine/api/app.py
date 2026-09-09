@@ -21,6 +21,7 @@ from kyt_engine.config import (
     VAE_WEIGHT,
     EXTERNAL_WEIGHT,
 )
+from kyt_engine.response_module import ResponseModule
 
 AUDIT_PATH = Path(os.environ.get("KYT_AUDIT_PATH", "data/audit/decisions.jsonl"))
 MODEL_DIR = Path(os.environ.get("KYT_MODEL_DIR", "models"))
@@ -71,6 +72,7 @@ def _build_pipeline() -> Pipeline:
             "external": EXTERNAL_WEIGHT,
         },
         audit_log=audit,
+        response_module=ResponseModule(),
     )
 
 
@@ -135,4 +137,5 @@ def predict(tx: TxRequest) -> PredictResponse:
         vae_anomaly=round(result.vae_anomaly, 6),
         external_risk=round(result.external_risk, 6),
         reasons=[ReasonItem(feature=str(r["feature"]), value=float(r["value"]), contribution=float(r["contribution"])) for r in result.reasons],
+        response=result.response,
     )

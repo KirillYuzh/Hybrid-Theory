@@ -34,6 +34,7 @@ class ScoreResult:
     vae_anomaly: float
     external_risk: float
     reasons: list[dict[str, float | str]]
+    response: dict[str, str] | None = None
 
 
 @dataclass

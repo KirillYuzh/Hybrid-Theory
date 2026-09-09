@@ -30,6 +30,7 @@ class PredictResponse(BaseModel):
     vae_anomaly: float
     external_risk: float
     reasons: list[ReasonItem]
+    response: dict[str, str] | None = None
 
 
 class HealthResponse(BaseModel):

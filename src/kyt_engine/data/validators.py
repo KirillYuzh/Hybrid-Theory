@@ -17,10 +17,16 @@ def validate_columns(df: pd.DataFrame, required: list[str], source: str) -> None
 
 
 def map_aml_labels(df: pd.DataFrame) -> pd.DataFrame:
-    """Map AML label strings to integers.
+    """
+    Map AML label strings to integers
 
     Maps: illicit -> 1, licit -> 0.
     Leaves already-integer labels unchanged.
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        DataFrame containing a 'label' column with AML labels.
     """
     df = df.copy()
     if df["label"].dtype == object or str(df["label"].dtype) == "string":
