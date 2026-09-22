@@ -88,3 +88,39 @@ def validate_edge_attributes(root: Path) -> pd.DataFrame:
     _check((attrs["amount"] >= 0).all() and attrs["amount"].notna().all(), "amount must be >= 0")
     _check(attrs["timestamp"].ge(0).all(), "timestamp must be >= 0")
     return attrs
+
+
+def validate_semantic_features(root: Path) -> pd.DataFrame:
+    """Cross-check the semantic feature columns against the edgelist and edge attributes.
+
+    Column plumbing of the fixed layout in features_semantic.SEMANTIC_COLUMNS:
+      index 0 -- in_degree  -> feat_2
+      index 1 -- out_degree -> feat_3
+      index 2 -- value_out  -> feat_4 (log1p of summed outgoing amounts)
+      index 3 -- value_in   -> feat_5 (log1p of summed incoming amounts)
+    """
+    features, _classes, edgelist = validate_dataset(root)
+    attrs = validate_edge_attributes(root)
+    # Edge attributes are row-aligned with the edgelist (validated above); merging could
+    # silently fan out duplicate (u,v) pairs in the p2p background, doubling sums.
+    f = features.set_index("txId")
+
+    in_deg = edgelist.groupby("txId2").size().reindex(f.index, fill_value=0).astype(int)
+    out_deg = edgelist.groupby("txId1").size().reindex(f.index, fill_value=0).astype(int)
+    _check((f["feat_2"] == in_deg).all(), "in_degree feature (feat_2) mismatch with edgelist")
+    _check((f["feat_3"] == out_deg).all(), "out_degree feature (feat_3) mismatch with edgelist")
+
+    import numpy as np
+
+    value_in = attrs.groupby("txId2")["amount"].sum().reindex(f.index, fill_value=0.0)
+    value_out = attrs.groupby("txId1")["amount"].sum().reindex(f.index, fill_value=0.0)
+    log1p = np.vectorize(lambda x: np.log1p(max(x, 0.0)))
+    _check(
+        np.allclose(f["feat_5"].astype(float).to_numpy(), log1p(value_in.to_numpy()), atol=1e-9),
+        "value_in feature (feat_5) mismatch with summed edge amounts",
+    )
+    _check(
+        np.allclose(f["feat_4"].astype(float).to_numpy(), log1p(value_out.to_numpy()), atol=1e-9),
+        "value_out feature (feat_4) mismatch with summed edge amounts",
+    )
+    return features

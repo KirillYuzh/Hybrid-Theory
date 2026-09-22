@@ -14,13 +14,18 @@ CLASS_TO_LABEL = {"illicit": "1", "licit": "2", "unknown": "unknown"}
 
 
 class EllipticStats:
-    """CDF artifacts of real Elliptic features per class + tx/step volume."""
+    """CDF artifacts of real Elliptic features per class + tx/step volume.
 
-    def __init__(self, root: Path) -> None:
+    `need_cdf=False` skips the feature CDFs: the `semantic` feature mode consumes only
+    the temporal step distribution (`volume.npy`).
+    """
+
+    def __init__(self, root: Path, need_cdf: bool = True) -> None:
         self.cdf: dict[str, np.ndarray] = {}
-        for name in CLASS_NAMES:
-            arr = np.load(root / f"cdf_{name}.npy")
-            self.cdf[name] = arr
+        if need_cdf:
+            for name in CLASS_NAMES:
+                arr = np.load(root / f"cdf_{name}.npy")
+                self.cdf[name] = arr
         self.volume = np.load(root / "volume.npy")
         self._step_weights = self.volume / self.volume.sum()
 

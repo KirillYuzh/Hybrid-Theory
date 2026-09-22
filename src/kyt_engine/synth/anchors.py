@@ -112,16 +112,37 @@ def _articulation_points(
     return sorted(arts)
 
 
+EDGE_RECIPES: dict[str, str] = {
+    "peel_chain": "peel",
+    "wash": "wash",
+    "structuring": "struct_deposit",
+    "cycle_round_trip": "round_trip",
+    "bridge_hopping": "bridge_swap",
+    "amm_swap_chain": "amm_swap",
+    "exchange_hub": "exchange",
+    "miner_payout": "payout",
+    "wallet_provider": "custody",
+}
+
+
 def _edge_recipe(pattern_type: str, edge: tuple[int, int], anchor: int) -> str:
     if pattern_type == "mixer":
         if edge[1] == anchor:
             return "mixer_in"
         return "mixer_out"
-    if pattern_type == "peel_chain":
-        return "peel"
-    if pattern_type == "wash":
-        return "wash"
-    return "star"  # fanout / hub_spoke
+    return EDGE_RECIPES.get(pattern_type, "star")  # fanout / hub_spoke / others
+
+
+def _central_anchor(node_ids: list[int], graph: GeneratedGraph, edge_ids: list[int]) -> int:
+    """Node minimizing eccentricity in the instance subgraph (most representative query),
+    ties resolved to the smallest node id for determinism."""
+    adj = _instance_adjacency(graph, node_ids, edge_ids)
+    best, best_ecc = node_ids[0], len(node_ids)
+    for n in node_ids:
+        ecc = max(_bfs_layers(adj, n).values(), default=0)
+        if ecc < best_ecc or (ecc == best_ecc and n < best):
+            best, best_ecc = n, ecc
+    return best
 
 
 def build_instances(graph: GeneratedGraph, config: GeneratorConfig) -> list[PatternInstance]:
@@ -131,7 +152,11 @@ def build_instances(graph: GeneratedGraph, config: GeneratorConfig) -> list[Patt
     for run in graph.runs:
         node_ids = list(range(run.node_id_start, run.node_id_start + run.node_count))
         edge_ids = list(range(run.edge_id_start, run.edge_id_start + run.edge_count))
-        anchor = node_ids[0]
+        anchor = (
+            _central_anchor(node_ids, graph, edge_ids)
+            if config.anchors.prefer_central_anchors
+            else node_ids[0]
+        )
         steps = [graph.nodes[n].step for n in node_ids]
         recipe = {e: _edge_recipe(run.name, graph.edges[e], anchor) for e in edge_ids}
         instances.append(

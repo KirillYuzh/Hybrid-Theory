@@ -7,12 +7,18 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from kyt_engine.synth.anchors import build_instances
 from kyt_engine.synth.config import GeneratorConfig
 from kyt_engine.synth.emit import write_dataset
 from kyt_engine.synth.features import build_features_matrix
 from kyt_engine.synth.graph import build_graph
 from kyt_engine.synth.stats import CDF_GRID, CLASS_NAMES, N_FEATURES, N_STEPS, EllipticStats
-from kyt_engine.synth.validate import load_elliptic, validate_dataset, validate_edge_attributes
+from kyt_engine.synth.validate import (
+    load_elliptic,
+    validate_dataset,
+    validate_edge_attributes,
+    validate_semantic_features,
+)
 
 OUT_FILES = [
     "elliptic_txs_features.csv",
@@ -62,6 +68,12 @@ def _run(cfg: GeneratorConfig) -> None:
     write_dataset(cfg, graph, feats, cfg.out_dir)
 
 
+def _run_semantic(cfg: GeneratorConfig) -> None:
+    stats = EllipticStats(cfg.stats_dir)
+    graph = build_graph(cfg, stats)
+    write_dataset(cfg, graph, None, cfg.out_dir)
+
+
 def test_generate_writes_valid_dataset(stats_dir: Path) -> None:
     cfg = _small_config(stats_dir)
     _run(cfg)
@@ -106,7 +118,7 @@ def test_wash_only_as_drift_scheme(stats_dir: Path) -> None:
     assert not wash_off, "wash is a drift-only scheme and must not appear when drift is disabled"
     cfg.drift.enabled = True
     cfg.drift.novel_step = 45
-    cfg.drift.novel_scheme = "wash"
+    cfg.drift.novel_schemes = ["wash"]
     graph_on = build_graph(cfg, EllipticStats(cfg.stats_dir))
     wash_on = [nd for nd in graph_on.nodes if nd.scheme == "wash"]
     assert wash_on and all(45 <= nd.step <= 49 for nd in wash_on)
@@ -118,15 +130,15 @@ def test_drift_reduces_late_illicit(stats_dir: Path) -> None:
     cfg.drift.shutdown_step = 35
     cfg.drift.shutdown_rate_multiplier = 0.0
     cfg.drift.novel_step = 45
+    cfg.drift.novel_schemes = ["wash"]
     graph = build_graph(cfg, EllipticStats(cfg.stats_dir))
+    novel = set(cfg.drift.novel_schemes)
     late_illicit = [
-        nd
-        for nd in graph.nodes
-        if nd.cls == "illicit" and nd.step >= 35 and nd.scheme != cfg.drift.novel_scheme
+        nd for nd in graph.nodes if nd.cls == "illicit" and nd.step >= 35 and nd.scheme not in novel
     ]
     assert late_illicit == []
-    novel = [nd for nd in graph.nodes if nd.scheme == cfg.drift.novel_scheme]
-    assert novel and all(nd.step >= 45 for nd in novel)
+    novel_nodes = [nd for nd in graph.nodes if nd.scheme in novel]
+    assert novel_nodes and all(nd.step >= 45 for nd in novel_nodes)
 
 
 @pytest.mark.parametrize("seed", range(6))
@@ -137,7 +149,7 @@ def test_drift_acceptance(stats_dir: Path, seed: int) -> None:
     cfg.drift.shutdown_step = 40
     cfg.drift.shutdown_rate_multiplier = 0.0
     cfg.drift.novel_step = 45
-    cfg.drift.novel_scheme = "wash"
+    cfg.drift.novel_schemes = ["wash"]
     graph = build_graph(cfg, EllipticStats(cfg.stats_dir))
     wash = [nd for nd in graph.nodes if nd.scheme == "wash"]
     assert wash and all(45 <= nd.step <= 49 for nd in wash)
@@ -221,7 +233,7 @@ def test_edge_attribute_invariants(stats_dir: Path) -> None:
     cfg.drift.shutdown_step = 40
     cfg.drift.shutdown_rate_multiplier = 0.0
     cfg.drift.novel_step = 45
-    cfg.drift.novel_scheme = "wash"
+    cfg.drift.novel_schemes = ["wash"]
     _run(cfg)
     manifest = json.loads((cfg.out_dir / "manifest.json").read_text())
     edge_gt = manifest["edge_attribute_ground_truth"]
@@ -289,3 +301,136 @@ def test_holdout_annotation(stats_dir: Path) -> None:
         assert inst["holdout"] == overlaps and inst["train_excluded"] == overlaps
         tagged += inst["holdout"]
     assert tagged >= 1
+
+
+def test_config_drift_legacy_yaml(tmp_path: Path, stats_dir: Path) -> None:
+    yaml_path = tmp_path / "ac.yaml"
+    yaml_path.write_text(
+        f"""
+seed: 1
+n_txs: 500
+stats_dir: {stats_dir}
+out_dir: {tmp_path / "out"}
+drift:
+  enabled: true
+  novel_scheme: wash
+features:
+  mode: semantic
+anchors:
+  prefer_central_anchors: false
+"""
+    )
+    cfg = GeneratorConfig.from_yaml(yaml_path)
+    assert cfg.drift.novel_schemes == ["wash"]
+    assert cfg.features.mode == "semantic"
+    assert cfg.anchors.prefer_central_anchors is False
+    assert cfg.to_dict()["drift"]["novel_schemes"] == ["wash"]
+
+
+def test_new_schemes_build(stats_dir: Path) -> None:
+    cfg = _small_config(stats_dir)
+    cfg.schemes.update(
+        {
+            "structuring": {"n_instances": 2, "deposits_range": (4, 8)},
+            "cycle_round_trip": {"n_instances": 2, "hops_range": (3, 5)},
+            "bridge_hopping": {"n_instances": 2, "bridges_range": (1, 2)},
+            "amm_swap_chain": {"n_instances": 2, "swaps_range": (2, 3)},
+            "exchange_hub": {"n_instances": 2, "clients_range": (5, 10)},
+            "miner_payout": {"n_instances": 2, "payouts_range": (4, 8)},
+            "wallet_provider": {"n_instances": 2, "addresses_range": (4, 8)},
+        }
+    )
+    _run(cfg)
+    validate_edge_attributes(cfg.out_dir)
+    manifest = json.loads((cfg.out_dir / "manifest.json").read_text())
+    types = {i["pattern_type"] for i in manifest["instance_ground_truth"]}
+    for t in (
+        "structuring",
+        "cycle_round_trip",
+        "bridge_hopping",
+        "amm_swap_chain",
+        "exchange_hub",
+        "miner_payout",
+        "wallet_provider",
+    ):
+        assert t in types, t
+    by_type = {i["pattern_type"]: i for i in manifest["instance_ground_truth"]}
+    for t, illicit_role, licit_role in (
+        ("structuring", "structurer", "smurf_0"),
+        ("bridge_hopping", "bridge_in_0", "bridge_user"),
+        ("exchange_hub", None, "client"),
+        ("wallet_provider", None, "custody_address"),
+    ):
+        inst = by_type[t]
+        roles = {
+            gt["role"]
+            for gt in manifest["ground_truth"]
+            if gt["instance_id"] == inst["instance_id"]
+        }
+        if illicit_role:
+            assert illicit_role in roles
+        assert licit_role in roles
+        assert inst["entity_type"] in {
+            "structuring_agent", "bridge_hopping_user", "exchange", "wallet_provider"
+        }
+    assert manifest["retrieval_specs"]["node_vector_dim"] == 167
+
+
+def test_multi_novel_drift(stats_dir: Path) -> None:
+    cfg = _small_config(stats_dir)
+    cfg.schemes["cycle_round_trip"] = {"n_instances": 2, "hops_range": (3, 5)}
+    cfg.drift.enabled = True
+    cfg.drift.shutdown_step = 40
+    cfg.drift.shutdown_rate_multiplier = 0.0
+    cfg.drift.novel_step = 45
+    cfg.drift.novel_schemes = ["wash", "cycle_round_trip"]
+    cfg.drift.scenario = "multi_novel"
+    graph = build_graph(cfg, EllipticStats(cfg.stats_dir))
+    novel = set(cfg.drift.novel_schemes)
+    by_scheme: dict[str, list[int]] = {}
+    for nd in graph.nodes:
+        if nd.scheme in novel:
+            by_scheme.setdefault(nd.scheme, []).append(nd.step)
+    for name in cfg.drift.novel_schemes:
+        steps = by_scheme.get(name)
+        assert steps, name
+        assert all(45 <= s <= 49 for s in steps), name
+    other_illicit = [
+        nd.step for nd in graph.nodes if nd.cls == "illicit" and nd.scheme not in novel
+    ]
+    assert max(other_illicit, default=0) < 40
+
+
+def test_semantic_features_mode(tmp_path: Path, stats_dir: Path) -> None:
+    cfg = _small_config(stats_dir)
+    cfg.features.mode = "semantic"
+    cfg1 = cfg
+    cfg1.out_dir = tmp_path / "a"
+    _run_semantic(cfg1)
+    cfg2 = _small_config(stats_dir)
+    cfg2.features.mode = "semantic"
+    cfg2.out_dir = tmp_path / "b"
+    _run_semantic(cfg2)
+
+    for name in OUT_FILES:
+        assert (cfg1.out_dir / name).read_bytes() == (cfg2.out_dir / name).read_bytes(), name
+
+    validate_semantic_features(cfg1.out_dir)
+    validate_dataset(cfg1.out_dir)
+    manifest = json.loads((cfg1.out_dir / "manifest.json").read_text())
+    assert manifest["config"]["features"]["mode"] == "semantic"
+    assert manifest["retrieval_specs"]["feature_mode"] == "semantic"
+    features, _c, _e = load_elliptic(cfg1.out_dir)
+    assert features.shape[1] == 167
+
+
+def test_anchor_centrality(stats_dir: Path) -> None:
+    cfg = _small_config(stats_dir)
+    graph = build_graph(cfg, EllipticStats(cfg.stats_dir))
+    instances = build_instances(graph, cfg)
+    peel = [i for i in instances if i.pattern_type == "peel_chain"]
+    assert any(i.anchor_role != "peel_hop_0" for i in peel), "central anchors expected"
+    cfg.anchors.prefer_central_anchors = False
+    instances2 = build_instances(graph, cfg)
+    peel2 = [i for i in instances2 if i.pattern_type == "peel_chain"]
+    assert all(i.anchor_role == "peel_hop_0" for i in peel2)

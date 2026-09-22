@@ -65,10 +65,12 @@ def build_graph(config: GeneratorConfig, stats: EllipticStats) -> GeneratedGraph
     n_licit_budget = n_labeled - n_illicit_budget
 
     pool = _flatten_pool(config)
-    # The scheme set aside as the drift "novel" pattern is never a regular scheme; it only
-    # surfaces in late steps when drift is enabled. It is still shuffled to keep the stream stable.
-    novel = [(n, p) for n, p in pool if n == drift.novel_scheme]
-    regular = [(n, p) for n, p in pool if n != drift.novel_scheme]
+    # Schemes set aside as the drift "novel" patterns never run as regular schemes;
+    # they only surface in late steps when drift is enabled. Still shuffled to keep the
+    # structural stream stable, so the AC reference numbers never move.
+    novel_names = set(drift.novel_schemes)
+    novel = [(n, p) for n, p in pool if n in novel_names]
+    regular = [(n, p) for n, p in pool if n not in novel_names]
     rng.shuffle(regular)
     rng.shuffle(novel)
 
