@@ -24,9 +24,9 @@
 
 Посаженные подграфы с ясной семантикой — это «правильные ответы» для тестов:
 
-- `mixer` — fan-in → mixer_core → fan-out (ядро illicit);
+- `mixer` — fan-in -> mixer_core -> fan-out (ядро illicit);
 - `peel_chain` — линейная цепь, все средние узлы illicit;
-- `fanout` — scam → жертвы (scam illicit);
+- `fanout` — scam -> жертвы (scam illicit);
 - `hub_spoke` — обменный хаб (licit);
 - `wash` — цикл wash-trading (illicit), **дрифт-эксклюзив**: появляется только в дрифт-режиме и только в конце временной шкалы;
 - `p2p` — фон (licit/unknown + остаток illicit-бюджета): случайные направленные рёбра между обычными транзакциями, без гарантии связности.
@@ -72,7 +72,7 @@ python -m kyt_engine.synth generate --config configs/generator.yaml
 python -m kyt_engine.synth validate --dir data/synthetic/run
 ```
 
-Детерминизм: одинаковый `seed` + одинаковый конфиг → байт-в-байт одинаковые файлы (включая manifest).
+Детерминизм: одинаковый `seed` + одинаковый конфиг -> байт-в-байт одинаковые файлы (включая manifest).
 
 ## Структура
 
