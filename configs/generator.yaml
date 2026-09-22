@@ -1,0 +1,40 @@
+seed: 42
+
+# Dataset size and proportions (Elliptic: 203769 tx, ~23% labeled, ~10% illicit among labeled).
+# labeled_ratio is a budget: schemes may fall below it, never above.
+n_txs: 10000
+labeled_ratio: 0.23
+illicit_ratio_in_labeled: 0.10
+
+stats_dir: data/elliptic_stats        # empirical CDF artifacts from the real Elliptic
+out_dir: data/synthetic/run           # output directory (3 CSV + manifest.json)
+
+# Scheme parameters: instances per type and size ranges.
+schemes:
+  mixer:
+    n_instances: 20
+    fan_in_range: [5, 25]
+    fan_out_range: [5, 25]
+  peel_chain:
+    n_instances: 25
+    length_range: [4, 10]
+  fanout:
+    n_instances: 30
+    victims_range: [5, 40]
+  hub_spoke:
+    n_instances: 10
+    spokes_range: [10, 40]
+  wash:
+    n_instances: 10               # novel-scheme for drift; drives the RNG stream, keep stable
+    cycle_len_range: [4, 8]
+
+# p2p background: random directed edges between ordinary txs (no connectivity guarantee).
+p2p_edges_per_tx: 1.5
+
+# Optional temporal drift (mirrors the DarkMarket closure in the real Elliptic).
+drift:
+  enabled: false
+  shutdown_step: 40                  # no non-novel illicit at steps >= shutdown_step
+  shutdown_rate_multiplier: 0.0      # fraction of late illicit schemes that survive the shutdown
+  novel_step: 45                     # the novel scheme first appears at this step
+  novel_scheme: wash                 # scheme set aside to appear only in late steps
