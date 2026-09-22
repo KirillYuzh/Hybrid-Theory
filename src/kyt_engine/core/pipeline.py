@@ -7,6 +7,7 @@ from kyt_engine.core.features import extract_base_features, extract_behavioral_f
 from kyt_engine.core.scorers import Scorer
 from kyt_engine.core.sinks import Sink
 from kyt_engine.core.triage import TriagePolicy
+from kyt_engine.response_module import ResponseModule, execute_response
 
 
 class Pipeline:
@@ -18,6 +19,7 @@ class Pipeline:
         sinks: list[Sink],
         weights: dict[str, float],
         audit_log: object | None = None,
+        response_module: ResponseModule | None = None,
     ) -> None:
         self._features = features
         self._scorers = scorers
@@ -25,6 +27,7 @@ class Pipeline:
         self._sinks = sinks
         self._weights = weights
         self._audit = audit_log
+        self._response_module = response_module
 
     def _feature_vector(self, tx: TxRecord, history: pd.DataFrame | None = None) -> FeatureVector:
         import pandas as pd
@@ -85,6 +88,9 @@ class Pipeline:
             external_risk=probas.get("external", 0.0),
             reasons=self._reasons(features, probas),
         )
+
+        if self._response_module is not None:
+            result.response = execute_response(result, self._response_module)
 
         if self._audit is not None and hasattr(self._audit, "append"):
             self._audit.append(tx, result, requested_by="api", model_version="1.0")

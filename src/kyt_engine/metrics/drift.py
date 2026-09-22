@@ -4,11 +4,19 @@ from typing import Optional, Dict, Any
 
 
 class PSIDriftDetector:
-    """Population Stability Index (PSI) drift detector.
+    """
+    Population Stability Index (PSI) drift detector.
     
     PSI < 0.1: no significant drift (green)
     0.1 <= PSI < 0.25: moderate drift (yellow)  
     PSI >= 0.25: significant drift (red) -> trigger retraining
+
+    Parameters
+    ----------
+    psi_threshold : float
+        Threshold for moderate drift (yellow zone). Default is 0.1.
+    warning_threshold : float
+        Threshold for significant drift (red zone). Default is 0.25.
     """
 
     def __init__(self, psi_threshold: float = 0.1, warning_threshold: float = 0.25):
@@ -79,7 +87,20 @@ class PSIDriftDetector:
 
 
 class ModelDriftDetector:
-    """Monitor model performance drift over time."""
+    """
+    Monitor model performance drift over time
+    
+    Parameters
+    ----------
+    auc_pr_threshold : float
+        Threshold for acceptable AUC-PR performance. Default is 0.99.
+    f1_threshold : float
+        Threshold for acceptable F1 performance. Default is 0.85.
+    metric_window : int
+        Number of recent metric values to consider for drift detection. Default is 1000.
+    degradation_threshold : float
+        Threshold for performance degradation to trigger an alert. Default is 0.02.
+    """
 
     def __init__(
         self,
@@ -158,7 +179,18 @@ class ModelDriftDetector:
 
 
 class DataDriftMonitor:
-    """Combines PSI feature drift with target distribution monitoring."""
+    """
+    Combines PSI feature drift with target distribution monitoring
+    
+    Parameters
+    ----------
+    psi_threshold : float
+        Threshold for moderate drift (yellow zone). Default is 0.1.
+    psi_warning : float
+        Threshold for significant drift (red zone). Default is 0.25.
+    monitor_target_dist : bool
+        Whether to monitor the target distribution for drift. Default is True.
+    """
 
     def __init__(
         self,

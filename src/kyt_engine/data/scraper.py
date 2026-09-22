@@ -190,7 +190,6 @@ class Scraper:
             self._sources = sources
 
     def fetch_all(self) -> pd.DataFrame:
-        """Collects data from all sources and returns merged DataFrame."""
         frames: list[pd.DataFrame] = []
         for src in self._sources:
             try:
@@ -223,7 +222,21 @@ class Scraper:
         return self._merge_sources(frames)
 
     def _normalize_df(self, raw: pd.DataFrame, source: str) -> pd.DataFrame:
-        """Normalize raw data to a common schema."""
+        """
+        Normalize raw data to a common schema.
+
+        Parameters
+        ----------
+        raw : pd.DataFrame
+            Raw DataFrame from a scraper source.
+        source : str
+            Name of the source for logging and confidence weighting.
+        
+        Returns
+        -------
+        pd.DataFrame
+            Normalized DataFrame with columns: address, label, source, confidence, timestamp.
+        """
         if raw.empty:
             return pd.DataFrame(
                 columns=["address", "label", "source", "confidence", "timestamp"]
@@ -284,7 +297,14 @@ class Scraper:
 
 
 def run_full_scrape() -> pd.DataFrame:
-    """Run all scrapers and save merged results."""
+    """""
+    Run all scrapers and save merged results.
+
+    Returns
+    -------
+    pd.DataFrame
+        Merged DataFrame of external labels with columns: address, label, source, confidence, timestamp.
+    """
     scrapers = [OpenSanctionsScraper()]
     all_labels: list[LabeledAddress] = []
     for s in scrapers:
@@ -303,7 +323,14 @@ def run_full_scrape() -> pd.DataFrame:
 
 
 class ExternalLabelStore:
-    """Manages the external labels database. Merges labels from multiple sources."""
+    """
+    Manages the external labels database. Merges labels from multiple sources.
+
+    Parameters
+    ----------
+    storage_dir : Optional[Path]
+        Directory to store the external labels Parquet files. Defaults to DATA_DIR.
+    """
 
     PRIORITY = {"ethereum_lists": 2, "open_source": 1, "opensanctions": 3}
 

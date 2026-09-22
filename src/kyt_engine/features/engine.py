@@ -2,6 +2,7 @@ import pandas as pd
 
 from kyt_engine.features.base import extract_base_features
 from kyt_engine.features.behavioral import extract_behavioral_features
+from kyt_engine.features.text_vectorizer import extract_text_features, nsA_text_vectorize
 
 
 class FeatureEngineer:
@@ -14,7 +15,9 @@ class FeatureEngineer:
         self._global_gas_median = float(df["gas_price"].median())
         sample = extract_base_features(df)
         behavioral = extract_behavioral_features(df, self._global_gas_median)
-        combined = pd.concat([sample, behavioral], axis=1)
+        text = extract_text_features(df)
+
+        combined = pd.concat([sample, behavioral, text], axis=1)
         self._feature_names = list(combined.columns)
         self._is_fitted = True
         return self
@@ -24,7 +27,8 @@ class FeatureEngineer:
             raise RuntimeError("FeatureEngineer must be fitted before transform")
         base = extract_base_features(df)
         behavioral = extract_behavioral_features(df, self._global_gas_median)
-        return pd.concat([base, behavioral], axis=1)
+        text = extract_text_features(df)
+        return pd.concat([base, behavioral, text], axis=1)
 
     def fit_transform(self, df: pd.DataFrame) -> pd.DataFrame:
         return self.fit(df).transform(df)
