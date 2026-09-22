@@ -221,6 +221,8 @@ __marimo__/
 data/raw/*
 data/interim/*
 data/processed/*
+data/elliptic_stats/*
+data/synthetic/*
 !data/raw/.gitkeep
 !data/interim/.gitkeep
 !data/processed/.gitkeep

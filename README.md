@@ -1,122 +1,60 @@
-# Hybrid Theory (KYT Engine)
+# Hybrid-Theory
 
-Движок анализа криптовалютных транзакций для банковского AML-комплаенса (PoC).
+Генератор синтетических криптовалютных транзакций в формате Elliptic++: по реальным статистикам блокчейн-транзакций строит вымышленный датасет, в котором заранее знаешь, что есть что. Это удобно для KYT/AML-экспериментов — поиска аномальных схем, обучения на ground truth, проверки устойчивости модели к временному дрейфу.
 
-Основной подход: смещение фокуса детектирования незаконных транзакций до момента их проведения. Система раннего предупреждения работает на основе `сравнения профилей атак` вместе с функционалом `node attention` для детального мониторинга отдельных кошельков и пользователей. 
+## Что получается на выходе
 
+После прогона в `data/synthetic/run/` лежат четыре CSV и один JSON:
 
-Обучен на датасете `Elliptic Bitcoin` (203,769 транзакций, 46,564 размеченных). Использует данные из `OpenSanctions` для расширения списка санкционных адресов. Извлекает 191 признак (165 статистических + 26 поведенческих) + графовые эмбеддинги. 
+| Файл | Формат |
+|------|--------|
+| `elliptic_txs_features.csv` | без шапки: `txId, time_step, feat_2..feat_166` (167 колонок) |
+| `elliptic_txs_classes.csv` | `txId, class`; class — строка: `1` (illicit), `2` (licit), `unknown` |
+| `elliptic_txs_edgelist.csv` | `txId1, txId2` — рёбра графа транзакций |
+| `elliptic_txs_edge_attributes.csv` | `txId1, txId2, amount, timestamp` — на каждое ребро сумма и время |
+| `manifest.json` | конфиг, seed, sha256 всех файлов и вся «расшифровка»: какие схемы посажены, где якоря, какие суммы на рёбрах схем |
 
-Классифицирует транзакции через LightGBM + K-Score + VAE + External Labels. На инфраструктуре Iceberg + Kafka + Flink + Spark.
+Эталонный прогон (`configs/generator.yaml`, seed 42): **10 000 tx, 14 092 ребра**. Временной сплит на привычные рубежи (train ≤30, valid 31–40, test 41–49) даёт **5856 / 2050 / 2094**; классы написаны как в настоящем Elliptic — `{'unknown', '2', '1'}`.
 
+## Почему это выглядит правдоподобно
 
-## Результаты
+В `data/elliptic_stats/` лежат эмпирические распределения (квантильные сетки CDF) по каждой из 165 фич для трёх классов транзакций — их один раз снимают с настоящего Elliptic (203 769 tx) скриптом `kyt_engine._stats.compute`. Дальше генератор для каждой транзакции тянет признаки inverse-CDF-сэмплингом по её классу, так что синтетика повторяет статистику реальных данных, а не какие-то абстрактные случайности.
 
-| Модель | Precision | Recall (illicit) | F1 | AUC-ROC | AUC-PR | Eval set |
-|--------|-----------|------------------|----|---------|--------|----------|
-| LightGBM | 0.980 | 0.999 | 0.991 | 0.958 | 0.9955 | val (t=37-44) |
-| Autoencoder | 0.927 | 1.000 | 0.963 | 0.563 | 0.9335 | val (t=37-44) |
-| Stacking Ensemble | 0.971 | 0.999 | 0.985 | 0.860 | 0.9948 | test (t=45-49) |
-| **Unified Scorer** | — | — | — | — | — | **production** |
-| **K-Score** | — | — | — | — | — | mean=0.162, GREEN=41,434, YELLOW=4,987, RED=143 |
-| **Triage** | — | — | — | — | — | **99.7% Priority, 0.3% Escalation** |
+## Схемы-паттерны
 
-![Сравнение моделей](docs/figures/model_comparison.png)
+Посаженные подграфы с ясной семантикой — это «правильные ответы» для тестов:
 
-![Матрицы ошибок](docs/figures/confusion_matrices.png)
+- `mixer` — fan-in → mixer_core → fan-out (ядро illicit);
+- `peel_chain` — линейная цепь, все средние узлы illicit;
+- `fanout` — scam → жертвы (scam illicit);
+- `hub_spoke` — обменный хаб (licit);
+- `wash` — цикл wash-trading (illicit), **дрифт-эксклюзив**: появляется только в дрифт-режиме и только в конце временной шкалы;
+- `p2p` — фон (licit/unknown + остаток illicit-бюджета): случайные направленные рёбра между обычными транзакциями, без гарантии связности.
 
-![ROC-кривые](docs/figures/roc_curves.png)
+## Пропорции (бюджеты)
 
-![Важность признаков](docs/figures/feature_importance.png)
+`labeled_ratio` и `illicit_ratio_in_labeled` — это потолки, а не точные обязательства: схемы могут дать меньше размеченных, чем бюджет, а недобор добирается фоном. Жёстко гарантируется только одно — ровно `n_txs` транзакций.
 
-![Временное распределение](docs/figures/temporal_distribution.png)
+## Retrieval-слой (включён по умолчанию)
 
-![Анализ дрифта](docs/figures/drift_analysis.png)
+Поверх схем строится контракт для поисковых бенчмарков:
 
-## Архитектура
+- **Инстансы** — каждый посаженный подграф целиком: состав (`node_ids`/`edge_ids`), временное окно, точки сочленения, роли рёбер;
+- **Якоря** — `per_1000_nodes` корней для запросов (жадный выбор с изоляцией ≥ `min_anchor_distance` хопов в полном графе) плюс `k_hop_neighborhoods` внутри инстанса;
+- **Edge-attributes** — суммы и таймстампы рёбер с проверяемыми инвариантами: у mixer `sum(in) = sum(out) + fee`, у peel_chain сумма убывает, wash-цикл балансируется в пределах tolerance;
+- **Decoys** — случайные fan_in/cycle-мотивы фона помечаются как «поисковый шум» (только аннотация, граф не трогается);
+- **Holdout** — `entries: [{pattern, step_min, step_max, train_excluded}]` — разметка инстансов, попавших в нужное временное окно.
 
-```mermaid
-flowchart LR
-    subgraph INGESTION["Data Ingestion"]
-        RPC["Blockchain RPC\n(Bitcoin/Ethereum)"]
-        EXT["External Feeds\n(OFAC, GoPlus, ScamDB, OpenSanctions)"]
-        RPC --> KAFKA["Kafka: raw_txs"]
-        EXT --> ICEBERG_RAW["Iceberg: raw_external_labels"]
-    end
+Суммы рёбер считаются своим отдельным RNG-потоком (`sha256(f"{seed}:attrs")`), поэтому эталонные числа выше от этого слоя не меняются, а выбор якорей и разметка полностью детерминированы.
 
-    subgraph STREAMING["Stream Processing (Flink)"]
-        KAFKA --> FLINK["Flink SQL\nFeature Computation"]
-        FLINK --> ICEBERG_FEAT["Iceberg: features"]
-    end
+## Temporal drift (опция)
 
-    subgraph BATCH["Batch Processing (Spark)"]
-        ICEBERG_FEAT --> STAT["StatFeatureExtractor\n(166 features)"]
-        ICEBERG_FEAT --> BEHAV["BehaviorFeatureExtractor\n(26 features)"]
-        ICEBERG_FEAT --> GRAPH["GraphFeatureExtractor\n(4 features)"]
-        ICEBERG_FEAT --> EMB["EmbeddingGenerator\n(Node2Vec 64-d)"]
-        STAT & BEHAV & GRAPH & EMB --> ICEBERG_FEAT_FULL["Iceberg: features (full)"]
-    end
+`drift.enabled: true` имитирует знакомый по Elliptic эффект — «закрытие» крупного illicit-флоу и появление новой схемы в хвосте:
 
-    subgraph TRAINING["ML Training"]
-        ICEBERG_FEAT_FULL --> TRAIN["ModelTrainer\nLightGBM / VAE / Ensemble"]
-        TRAIN --> MLFLOW["MLflow Tracking"]
-        TRAIN --> ICEBERG_MODEL["Iceberg: models registry"]
-    end
+- `shutdown_step` (рекомендуется 40) — с этого шага старые illicit-схемы подавляются; `shutdown_rate_multiplier` — доля выживающих;
+- `novel_step` (рекомендуется 45) + `novel_scheme` (wash) — новая схема на шагах 45–49 (проверка, обобщится ли модель на невиданное).
 
-    subgraph INFERENCE["Inference API (FastAPI)"]
-        API["REST /predict\n/batch-predict"]
-        REDIS["Redis Cache\nFeature Store"]
-        MODEL_LOADER["ModelLoader\n(MLflow + Iceberg)"]
-        SCORER["UnifiedScorer\nLGBM + K-Score + VAE + External"]
-        TRIAGE["TriageSystem\nauto_close / priority / escalation"]
-        SHAP["SHAP Explainer"]
-        
-        API --> REDIS
-        API --> MODEL_LOADER
-        MODEL_LOADER --> SCORER
-        SCORER --> TRIAGE
-        SCORER --> SHAP
-    end
-
-    subgraph ACTIVE["Active Learning"]
-        SCORER --> AL_SAMPLER["UncertaintySampler\nentropy + K-Score"]
-        AL_SAMPLER --> ANALYST["Analyst Labeling"]
-        ANALYST --> FEEDBACK["FeedbackLoop\nincremental retrain"]
-        FEEDBACK --> TRAIN
-    end
-
-    subgraph MONITORING["Observability"]
-        PROM["Prometheus\nMetrics"]
-        BIGQUERY["BigQuery\nAnalytics"]
-        GREAT_EXP["Great Expectations\nData Quality"]
-        
-        API --> PROM
-        ICEBERG_FEAT --> GREAT_EXP
-        ICEBERG_FEAT --> BIGQUERY
-    end
-```
-
-## Data Lakehouse
-
-Промышленная версия KYT Engine построена на data lakehouse-архитектуре с Apache Iceberg в качестве unified storage layer. Lakehouse сочетает гибкость data lake (произвольные форматы, schema-on-read) с транзакционными гарантиями data warehouse (ACID, time-travel, schema evolution).
-
-**Ключевые Iceberg-таблицы:**
-
-| Таблица | Партиция | Назначение |
-|---------|----------|-----------|
-| `raw_txs` | days(timestamp) | Сырые блокчейн-транзакции из Kafka + исторические CSV |
-| `raw_external_labels` | days(timestamp) | OFAC/GoPlus/ScamDB/OpenSanctions лейблы с confidence scoring |
-| `features` | days(timestamp) | Полный набор из 196 признаков (166 stat + 26 behavior + 4 graph + 64-d embedding) |
-| `predictions` | days(timestamp) | Результаты Unified Scorer с risk_score, risk_zone, triage_level, SHAP |
-| `models` | — | Версионированный реестр моделей с метриками и snapshot-ID обучающих данных |
-
-**Преимущества lakehouse-подхода:**
-
-- **ACID-транзакции:** атомарные коммиты предотвращают чтение частично обогащённых features
-- **Time-travel:** воспроизведение предсказаний на конкретный момент времени для аудита
-- **Schema evolution:** добавление колонок (stat_feat_167, embedding_65) без миграции
-- **Partition evolution:** смена стратегии партиционирования без перезаписи данных
-- **Hidden partitioning:** партиция по дням, прозрачная для пользователя
+Проверенный сценарий: `shutdown_step: 40`, `shutdown_rate_multiplier: 0.0`, `novel_step: 45` — wash строго на 45–49, старый illicit только до шага 40.
 
 ## Быстрый старт
 
@@ -124,44 +62,50 @@ flowchart LR
 python3 -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
 
-# Обучение на реальных данных Elliptic
-python -m kyt_engine.training.train_real
+# 1. Снять статистики с настоящего Elliptic (data/raw/elliptic_txs_features.csv, ~690 МБ)
+python -m kyt_engine._stats.compute
 
-# Запуск API
-make serve
-# http://0.0.0.0:8000
+# 2. Сгенерировать датасет (configs/generator.yaml)
+python -m kyt_engine.synth generate --config configs/generator.yaml
+
+# 3. Проверить, что датасет собран по контракту
+python -m kyt_engine.synth validate --dir data/synthetic/run
 ```
+
+Детерминизм: одинаковый `seed` + одинаковый конфиг → байт-в-байт одинаковые файлы (включая manifest).
 
 ## Структура
 
 ```
 Hybrid-Theory/
-├── configs/config.yaml
+├── .agents/skills/generator/SKILL.md  # навигационный SKILL по проекту
+├── configs/generator.yaml          # параметры: размеры, схемы, дрифт, retrieval
 ├── data/
-│   ├── raw/                    # Elliptic CSV
-│   └── external/               # OFAC, GoPlus, ScamDB, OpenSanctions cache
-├── docs/                        
-│   ├── README.md                # Detailed documentation
-│   ├── methodology.md           # Technical methodology
-│   ├── results.md               # Evaluation results
-│   └── figures/                 # Graphs
-├── models/                      # Serialized models (.pkl)
-├── notebooks/                   # Jupyter (EDA, training, evaluation)
+│   ├── raw/                        # Elliptic (gitignored, источник статистик)
+│   └── elliptic_stats/             # CDF-артефакты (создаёт compute)
 ├── src/kyt_engine/
-│   ├── data/                    # Loaders, scrapers, Iceberg store
-│   ├── features/                # Feature engineering + Spark extractors
-│   ├── ingestion/               # Kafka producer, Flink job
-│   ├── metrics/                 # Metrics + SHAP
-│   ├── models/                  # LightGBM, Autoencoder, K-Score, Triage, UnifiedScorer
-│   ├── training/                # train_real, active_learning
-│   └── api/                     # FastAPI inference service
-└── tests/                       
+│   ├── _stats/compute.py           # разовое снятие статистик с Elliptic
+│   └── synth/
+│       ├── config.py               # GeneratorConfig (yaml)
+│       ├── stats.py                # загрузка CDF, sample_features (inverse-CDF+jitter)
+│       ├── schemes.py              # шаблоны схем
+│       ├── graph.py                # сборка графа, шагов, дрифта, SchemeRun (границы инстансов)
+│       ├── anchors.py              # инстансы, edge-атрибуты, якоря, K-hop, decoy, holdout
+│       ├── features.py             # фиче-матрица по классам
+│       ├── emit.py                 # 4 CSV + manifest.json (sha256, ground truth, retrieval)
+│       ├── validate.py             # контракт-валидатор
+│       └── __main__.py             # CLI: generate | validate
+├── tests/test_synth.py
+└── TASKS/pivot-to-synthetic-data/  # артефакты задачи
 ```
 
-## Стек
+## Тесты
 
-Python 3.10+ | LightGBM | PyTorch (VAE) | NetworkX + Node2Vec | FastAPI | Redis | Kafka | Flink | Spark | Iceberg | MLflow | Prometheus | Pytest | OpenSanctions
+```bash
+make test   # pytest tests/
+make lint   # ruff check + format --check
+```
 
 ## Лицензия
 
-GNU Affero General Public License — Copyright (c) 2026 Kirill Yuzhakov
+GNU AGPL — Copyright (c) 2026 Kirill Yuzhakov.

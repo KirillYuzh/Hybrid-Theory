@@ -1,19 +1,29 @@
+.PHONY: install test lint clean stats generate validate
+
+VENV := .venv
+PYTHON := $(VENV)/bin/python
+PIP := $(VENV)/bin/pip
+
 install:
-    pip install -e ".[dev]"
+	$(PIP) install -e ".[dev]"
 
 test:
-    python -m pytest tests/ -v
-
-train:
-    python -m kyt_engine.training
-
-serve:
-    uvicorn kyt_engine.api.app:app --reload --host 0.0.0.0 --port 8000
+	$(PYTHON) -m pytest tests/ -v
 
 lint:
-    ruff check src/ tests/
-    ruff format src/ tests/
+	$(PYTHON) -m ruff check src/ tests/
+	$(PYTHON) -m ruff format --check src/ tests/
 
 clean:
-    find . -type d -name __pycache__ -exec rm -rf {} +
-    find . -type f -name "*.pyc" -delete
+	find . -type d -name __pycache__ -exec rm -rf {} +
+	find . -type f -name "*.pyc" -delete
+	rm -rf .ruff_cache .pytest_cache
+
+stats:
+	$(PYTHON) -m kyt_engine._stats.compute
+
+generate:
+	$(PYTHON) -m kyt_engine.synth generate --config configs/generator.yaml
+
+validate:
+	$(PYTHON) -m kyt_engine.synth validate --dir data/synthetic/run
