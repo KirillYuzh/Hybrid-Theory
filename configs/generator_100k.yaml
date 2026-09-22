@@ -2,12 +2,12 @@ seed: 42
 
 # Dataset size and proportions (Elliptic: 203769 tx, ~23% labeled, ~10% illicit among labeled).
 # labeled_ratio is a budget: schemes may fall below it, never above.
-n_txs: 10000
+n_txs: 100000
 labeled_ratio: 0.23
 illicit_ratio_in_labeled: 0.10
 
 stats_dir: data/elliptic_stats        # empirical CDF artifacts from the real Elliptic
-out_dir: data/synthetic/run           # output directory (3 CSV + manifest.json)
+out_dir: data/synthetic/run_100k      # output directory (4 CSV + manifest.json)
 
 # Scheme parameters: instances per type and size ranges.
 schemes:

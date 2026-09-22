@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "kyt-engine"
 version = "0.2.0"
-description = "Synthetic Elliptic++ transaction generator (KVТ data for Spillety)"
+description = "Synthetic Elliptic++ transaction generator (KYT data)"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [

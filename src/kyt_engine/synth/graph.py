@@ -22,9 +22,21 @@ class TxNode:
 
 
 @dataclass
+class SchemeRun:
+    """Contiguous block of an instance in graph.nodes/graph.edges (tx_id == node index)."""
+
+    name: str
+    node_id_start: int
+    node_count: int
+    edge_id_start: int
+    edge_count: int
+
+
+@dataclass
 class GeneratedGraph:
     nodes: list[TxNode] = field(default_factory=list)
     edges: list[tuple[int, int]] = field(default_factory=list)
+    runs: list[SchemeRun] = field(default_factory=list)
 
 
 def _offset_steps(rng: np.random.Generator, birth: int, n: int) -> list[int]:
@@ -67,6 +79,8 @@ def build_graph(config: GeneratorConfig, stats: EllipticStats) -> GeneratedGraph
     def _register(scheme: Scheme, birth: int) -> None:
         nonlocal next_id, consumed_illicit
         steps = _offset_steps(rng, birth, len(scheme.nodes))
+        initial_edge_count = len(graph.edges)
+        node_id_start = next_id
         local_to_global: dict[int, int] = {}
         for local, node in enumerate(scheme.nodes):
             tx_id = next_id
@@ -85,6 +99,15 @@ def build_graph(config: GeneratorConfig, stats: EllipticStats) -> GeneratedGraph
                 consumed_illicit += 1
         for u, v in scheme.edges:
             graph.edges.append((local_to_global[u], local_to_global[v]))
+        graph.runs.append(
+            SchemeRun(
+                name=scheme.name,
+                node_id_start=node_id_start,
+                node_count=len(scheme.nodes),
+                edge_id_start=initial_edge_count,
+                edge_count=len(scheme.edges),
+            )
+        )
 
     for name, params in regular:
         scheme = BUILDERS[name](rng, params)

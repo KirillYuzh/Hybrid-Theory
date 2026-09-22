@@ -32,7 +32,7 @@ def _check(condition: bool, message: str) -> None:
 def validate_dataset(
     root: Path,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    """Contract validator mirroring spillety.data.loader expectations.
+    """Contract validator mirroring the dataset loader expectations.
 
     - features: 167 columns [txId, time_step, feat_2..feat_166], int time_step, no NaN;
     - classes: [txId, class], class in {"1", "2", "unknown"};
@@ -62,6 +62,29 @@ def validate_dataset(
 
 
 def load_elliptic(root: Path) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    """Load a dataset the same way spillety.data.loader.load_elliptic does (no merge)."""
+    """Load a dataset the same way the dataset loader does (no merge)."""
     features, classes, edgelist = validate_dataset(root)
     return features, classes, edgelist
+
+
+def validate_edge_attributes(root: Path) -> pd.DataFrame:
+    """Structural checks only (row alignment + ranges).
+
+    Invariant-level checks (mixer fee, peel monotony, wash balance) live in
+    tests/test_synth.py::test_edge_attribute_invariants, not here.
+    """
+    path = root / "elliptic_txs_edge_attributes.csv"
+    if not path.exists():
+        raise FileNotFoundError(f"edge attributes not found: {path}")
+    edgelist = pd.read_csv(root / "elliptic_txs_edgelist.csv")
+    attrs = pd.read_csv(path)
+    _check(list(attrs.columns) == ["txId1", "txId2", "amount", "timestamp"], list(attrs.columns))
+    _check(
+        len(attrs) == len(edgelist),
+        f"edge attributes rows {len(attrs)}, edgelist {len(edgelist)}",
+    )
+    _check(attrs["txId1"].astype(int).equals(edgelist["txId1"]), "txId1 mismatch with edgelist")
+    _check(attrs["txId2"].astype(int).equals(edgelist["txId2"]), "txId2 mismatch with edgelist")
+    _check((attrs["amount"] >= 0).all() and attrs["amount"].notna().all(), "amount must be >= 0")
+    _check(attrs["timestamp"].ge(0).all(), "timestamp must be >= 0")
+    return attrs

@@ -33,10 +33,16 @@ def _generate(config_path: Path) -> None:
 
 
 def _validate(dir_path: Path) -> None:
-    from .validate import validate_dataset
+    from .validate import validate_dataset, validate_edge_attributes
 
     validate_dataset(dir_path)
-    print(f"OK: {dir_path} satisfies spillety loader contract")
+    print(f"OK: {dir_path} satisfies the dataset contract")
+    try:
+        validate_edge_attributes(dir_path)
+    except FileNotFoundError:
+        print(f"note: {dir_path}/elliptic_txs_edge_attributes.csv missing (older dataset)")
+    else:
+        print("OK: edge attributes file present and consistent")
 
 
 def main() -> None:
@@ -44,7 +50,7 @@ def main() -> None:
     sub = parser.add_subparsers(dest="cmd", required=True)
     g = sub.add_parser("generate", help="Generate a synthetic dataset")
     g.add_argument("--config", default="configs/generator.yaml")
-    v = sub.add_parser("validate", help="Check a dataset against the Spillety contract")
+    v = sub.add_parser("validate", help="Check a dataset against the format contract")
     v.add_argument("--dir", default="data/synthetic/run")
     args = parser.parse_args()
     if args.cmd == "generate":

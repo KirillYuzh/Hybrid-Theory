@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 
 import numpy as np
+import pandas as pd
 import pytest
 
 from kyt_engine.synth.config import GeneratorConfig
@@ -11,12 +12,13 @@ from kyt_engine.synth.emit import write_dataset
 from kyt_engine.synth.features import build_features_matrix
 from kyt_engine.synth.graph import build_graph
 from kyt_engine.synth.stats import CDF_GRID, CLASS_NAMES, N_FEATURES, N_STEPS, EllipticStats
-from kyt_engine.synth.validate import load_elliptic, validate_dataset
+from kyt_engine.synth.validate import load_elliptic, validate_dataset, validate_edge_attributes
 
 OUT_FILES = [
     "elliptic_txs_features.csv",
     "elliptic_txs_classes.csv",
     "elliptic_txs_edgelist.csv",
+    "elliptic_txs_edge_attributes.csv",
     "manifest.json",
 ]
 
@@ -141,3 +143,149 @@ def test_drift_acceptance(stats_dir: Path, seed: int) -> None:
     assert wash and all(45 <= nd.step <= 49 for nd in wash)
     non_wash_illicit = [nd for nd in graph.nodes if nd.cls == "illicit" and nd.scheme != "wash"]
     assert max((nd.step for nd in non_wash_illicit), default=0) < 40
+
+
+def _bfs(graph: dict[int, list[int]], src: int, dst: int, cap: int) -> int | None:
+    # ponytail: re-implemented mirror of anchors._bfs_distance; keeps the test non-tautological.
+    """BFS distance up to cap; None when farther."""
+    if src == dst:
+        return 0
+    dist = {src: 0}
+    queue = [src]
+    for u in queue:
+        if dist[u] >= cap:
+            continue
+        for v in graph[u]:
+            if v not in dist:
+                dist[v] = dist[u] + 1
+                if v == dst:
+                    return dist[v]
+                queue.append(v)
+    return None
+
+
+def _undirected(edgelist: list[tuple[int, int]]) -> dict[int, list[int]]:
+    adj: dict[int, list[int]] = {}
+    for u, v in edgelist:
+        adj.setdefault(u, []).append(v)
+        adj.setdefault(v, []).append(u)
+    return {k: sorted(lst) for k, lst in adj.items()}
+
+
+def test_edge_attributes_file_consistent(stats_dir: Path) -> None:
+    cfg = _small_config(stats_dir)
+    _run(cfg)
+    validate_edge_attributes(cfg.out_dir)
+    attrs = pd.read_csv(cfg.out_dir / "elliptic_txs_edge_attributes.csv")
+    assert len(attrs) == len(pd.read_csv(cfg.out_dir / "elliptic_txs_edgelist.csv"))
+
+
+def test_manifest_retrieval_contract(stats_dir: Path) -> None:
+    cfg = _small_config(stats_dir)
+    cfg.anchors.per_1000_nodes = 5
+    _run(cfg)
+    manifest = json.loads((cfg.out_dir / "manifest.json").read_text())
+    for key in (
+        "anchor_registry",
+        "retrieval_specs",
+        "instance_ground_truth",
+        "edge_attribute_ground_truth",
+        "decoys",
+        "holdout",
+    ):
+        assert key in manifest
+    instances = {i["instance_id"]: i for i in manifest["instance_ground_truth"]}
+    assert manifest["retrieval_specs"]["node_vector_dim"] == 167
+    anchors = manifest["anchor_registry"]["anchors"]
+    assert len(anchors) >= 1
+    for a in anchors:
+        inst = instances[a["instance_id"]]
+        assert a["anchor_node_id"] == inst["anchor_node_id"]
+        for k, nodes in a["k_hop_neighborhoods"].items():
+            assert set(nodes) <= set(inst["node_ids"])
+    edges = pd.read_csv(cfg.out_dir / "elliptic_txs_edgelist.csv")
+    adj = _undirected(list(zip(edges["txId1"], edges["txId2"])))
+    md = cfg.anchors.min_anchor_distance
+    ids = [a["anchor_node_id"] for a in anchors]
+    for i, a in enumerate(ids):
+        for b in ids[i + 1 :]:
+            d = _bfs(adj, a, b, md)
+            assert d is None or d >= md, (a, b, d)
+    for gt in manifest["ground_truth"]:
+        assert "instance_id" in gt
+
+
+def test_edge_attribute_invariants(stats_dir: Path) -> None:
+    cfg = _small_config(stats_dir)
+    cfg.drift.enabled = True
+    cfg.drift.shutdown_step = 40
+    cfg.drift.shutdown_rate_multiplier = 0.0
+    cfg.drift.novel_step = 45
+    cfg.drift.novel_scheme = "wash"
+    _run(cfg)
+    manifest = json.loads((cfg.out_dir / "manifest.json").read_text())
+    edge_gt = manifest["edge_attribute_ground_truth"]
+    by_inst: dict[int, list[dict]] = {}
+    for e in edge_gt:
+        by_inst.setdefault(e["instance_id"], []).append(e)
+    seen_mixer = seen_peel = seen_wash = 0
+    for inst in manifest["instance_ground_truth"]:
+        entries = sorted(by_inst[inst["instance_id"]], key=lambda e: e["edge_id"])
+        amounts = [e["amount"] for e in entries]
+        if inst["pattern_type"] == "mixer":
+            seen_mixer += 1
+            total_in = sum(a for e, a in zip(entries, amounts) if e["role"] == "mixer_in")
+            total_out = sum(a for e, a in zip(entries, amounts) if e["role"] == "mixer_out")
+            fee_ratio = (total_in - total_out) / total_in
+            fee_lo, fee_hi = cfg.edge_attributes.amount["mixer"]["fee_fraction"]
+            assert fee_lo - 0.001 <= fee_ratio <= fee_hi + 0.001, (inst["instance_id"], fee_ratio)
+        elif inst["pattern_type"] == "peel_chain":
+            seen_peel += 1
+            assert all(amounts[i] >= amounts[i + 1] for i in range(len(amounts) - 1)), amounts
+            assert amounts[0] > amounts[-1], amounts
+        elif inst["pattern_type"] == "wash":
+            seen_wash += 1
+            tol = cfg.edge_attributes.amount["wash"]["balance_tolerance"]
+            in_out: dict[int, list[float]] = {}
+            for e in entries:
+                in_out.setdefault(e["txId1"], []).append(("out", e["amount"]))
+                in_out.setdefault(e["txId2"], []).append(("in", e["amount"]))
+            for node, flows in in_out.items():
+                in_sum = sum(a for tag, a in flows if tag == "in")
+                out_sum = sum(a for tag, a in flows if tag == "out")
+                diff = abs(in_sum - out_sum)
+                assert diff <= tol * max(in_sum, out_sum, 1e-9), (inst["instance_id"], node)
+    assert seen_mixer >= 1 and seen_peel >= 1
+    assert seen_wash >= 1, "wash instances expected with drift enabled"
+
+
+def test_decoys_valid(stats_dir: Path) -> None:
+    cfg = _small_config(stats_dir)
+    cfg.p2p_edges_per_tx = 3
+    _run(cfg)
+    manifest = json.loads((cfg.out_dir / "manifest.json").read_text())
+    schemes = {gt["txId"]: gt["scheme"] for gt in manifest["ground_truth"]}
+    for dec in manifest["decoys"]:
+        assert dec["motif"] in {"fan_in", "cycle"}
+        assert all(schemes[n] == "p2p" for n in dec["nodes"])
+    cfg2 = _small_config(stats_dir)
+    cfg2.background.decoy_detection = False
+    _run(cfg2)
+    manifest2 = json.loads((cfg2.out_dir / "manifest.json").read_text())
+    assert manifest2["decoys"] == []
+
+
+def test_holdout_annotation(stats_dir: Path) -> None:
+    cfg = _small_config(stats_dir)
+    entry = {"pattern": "fanout", "step_min": 30, "step_max": 49, "train_excluded": True}
+    cfg.holdout.entries = [entry]
+    _run(cfg)
+    manifest = json.loads((cfg.out_dir / "manifest.json").read_text())
+    assert manifest["holdout"]["windows_active"] is True
+    tagged = 0
+    for inst in manifest["instance_ground_truth"]:
+        lo, hi = inst["temporal_window"]
+        overlaps = inst["pattern_type"] == "fanout" and max(lo, 30) <= min(hi, 49)
+        assert inst["holdout"] == overlaps and inst["train_excluded"] == overlaps
+        tagged += inst["holdout"]
+    assert tagged >= 1
