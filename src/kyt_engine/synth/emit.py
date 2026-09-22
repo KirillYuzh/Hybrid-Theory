@@ -33,11 +33,55 @@ def _sha256(path: Path) -> str:
 def write_dataset(
     config: GeneratorConfig,
     graph: GeneratedGraph,
-    features: np.ndarray,
+    features: np.ndarray | None,
     out_dir: Path,
 ) -> None:
-    """Emit the CSVs in Elliptic++ format + edge attributes + self-describing manifest.json."""
+    """Emit the CSVs in Elliptic++ format + edge attributes + self-describing manifest.json.
+
+    `features=None` builds the feature matrix here: `semantic` mode computes interpretable
+    features from the graph + edge attributes (no Elliptic CDF); otherwise the default
+    `cdf` mode runs inverse-CDF sampling.
+    """
     out_dir.mkdir(parents=True, exist_ok=True)
+
+    instances = build_instances(graph, config)
+    select_anchors(instances, graph, config)
+    windows_active = apply_holdout(instances, config)
+    decoys = detect_decoys(graph, config)
+    id_of = instance_id_of(graph, instances)
+    edge_attrs = build_edge_attributes(graph, instances, config, attr_rng(config.seed))
+
+    if features is None:
+        if config.features.mode == "semantic":
+            from .features_semantic import (
+                SEMANTIC_COLUMNS,
+                build_semantic_features,
+            )
+
+            n_nodes = len(graph.nodes)
+            features = np.empty((n_nodes, 2 + N_FEATURES), dtype=np.float64)
+            features[:, 0] = [nd.tx_id for nd in graph.nodes]
+            features[:, 1] = [nd.step for nd in graph.nodes]
+            features[:, 2:] = build_semantic_features(graph, edge_attrs)
+            feature_semantics = {
+                "mode": "semantic",
+                "column_layout": {str(j): name for j, name in SEMANTIC_COLUMNS.items()},
+                "csv_columns": "feat_{j + 2} == column j above; "
+                "remaining columns are deterministic derived transforms",
+                "note": "computed from topology/amounts; NOT sampled from the Elliptic CDFs",
+            }
+        else:
+            from .features import build_features_matrix
+            from .stats import EllipticStats
+
+            stats = EllipticStats(config.stats_dir)
+            features = build_features_matrix(np.random.default_rng(config.seed), graph, stats)
+            feature_semantics = {"mode": "cdf", "note": "inverse-CDF from real Elliptic marginals"}
+    else:
+        feature_semantics = {
+            "mode": config.features.mode,
+            "note": "feature matrix provided by the caller",
+        }
 
     cols = ["txId", "time_step"] + [f"feat_{i}" for i in range(2, 2 + N_FEATURES)]
     feats = pd.DataFrame(features, columns=cols)
@@ -55,13 +99,6 @@ def write_dataset(
 
     edge_df = pd.DataFrame(graph.edges, columns=["txId1", "txId2"])
     edge_df.to_csv(out_dir / "elliptic_txs_edgelist.csv", index=False)
-
-    instances = build_instances(graph, config)
-    select_anchors(instances, graph, config)
-    windows_active = apply_holdout(instances, config)
-    decoys = detect_decoys(graph, config)
-    id_of = instance_id_of(graph, instances)
-    edge_attrs = build_edge_attributes(graph, instances, config, attr_rng(config.seed))
 
     attrs_df = pd.DataFrame(edge_attrs)  # indexes == edgelist row numbers
     attrs_df.to_csv(out_dir / "elliptic_txs_edge_attributes.csv", index=False)
@@ -134,7 +171,9 @@ def write_dataset(
             "entity_type_key": "entity_type",
             "neighborhood_field": "k_hop_neighborhoods",
             "default_k": max(config.anchors.k_hop_range or [0]),
+            "feature_mode": config.features.mode,
         },
+        "feature_semantics": feature_semantics,
         "decoys": decoys,
         "holdout": {"windows_active": windows_active, "entries": config.holdout.entries},
     }

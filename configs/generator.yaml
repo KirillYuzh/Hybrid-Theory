@@ -6,10 +6,22 @@ n_txs: 10000
 labeled_ratio: 0.23
 illicit_ratio_in_labeled: 0.10
 
-stats_dir: data/elliptic_stats        # empirical CDF artifacts from the real Elliptic
-out_dir: data/synthetic/run           # output directory (3 CSV + manifest.json)
+# Feature engine. Two modes:
+#   cdf      - inverse-CDF sampling from real Elliptic marginals (historical profile).
+#              Inherits Elliptic anonymization and the 2016-2017 window; kept for
+#              backward compatibility and distribution fidelity of the legacy format.
+#   semantic - interpretable features computed from topology + edge attributes
+#              (degrees, aggregated amounts, UTXO ages, time deltas). No Elliptic CDFs
+#              involved; layout is documented in feature_semantics of the manifest.
+features:
+  mode: cdf
+
+stats_dir: data/elliptic_stats        # empirical CDF artifacts (only volume.npy needed for semantic mode)
+out_dir: data/synthetic/run           # output directory (4 CSV + manifest.json)
 
 # Scheme parameters: instances per type and size ranges.
+# schemes with n_instances: 0 are available but disabled by default (the AC reference
+# dataset must stay stable at 10000 tx / 14092 edges / split 5856:2050:2094).
 schemes:
   mixer:
     n_instances: 20
@@ -28,16 +40,45 @@ schemes:
     n_instances: 10               # novel-scheme for drift; drives the RNG stream, keep stable
     cycle_len_range: [4, 8]
 
+  # --- modern laundering typologies (opt-in) ---
+  structuring:                    # classic smurfing under thresholds
+    n_instances: 0
+    deposits_range: [5, 30]
+  cycle_round_trip:               # funds return to originator through a closed cycle
+    n_instances: 0
+    hops_range: [3, 6]
+  bridge_hopping:                 # cross-chain: entry -> bridge -> ... -> recipient
+    n_instances: 0
+    bridges_range: [1, 3]
+  amm_swap_chain:                 # sequential swaps through AMM pools
+    n_instances: 0
+    swaps_range: [2, 5]
+
+  # --- licit schemes: give the licit class real semantics (not random p2p noise) ---
+  exchange_hub:
+    n_instances: 0
+    clients_range: [20, 60]
+  miner_payout:
+    n_instances: 0
+    payouts_range: [10, 40]
+  wallet_provider:
+    n_instances: 0
+    addresses_range: [10, 50]
+
 # p2p background: random directed edges between ordinary txs (no connectivity guarantee).
+# See README "Limitations": p2p is structural noise, not a semantic licit profile.
 p2p_edges_per_tx: 1.5
 
 # Optional temporal drift (mirrors the DarkMarket closure in the real Elliptic).
+# Multiple novel schemes may surface simultaneously (multi-pattern drift).
+# shutdown_rate_multiplier: 0.0 = hard shutdown, 1.0 = nothing dies, (0,1) = gradual decay.
 drift:
   enabled: false
   shutdown_step: 40                  # no non-novel illicit at steps >= shutdown_step
   shutdown_rate_multiplier: 0.0      # fraction of late illicit schemes that survive the shutdown
-  novel_step: 45                     # the novel scheme first appears at this step
-  novel_scheme: wash                 # scheme set aside to appear only in late steps
+  novel_step: 45                     # novel schemes first appear at this step
+  novel_schemes: [wash]              # schemes set aside to appear only in late steps
+  scenario: null                     # optional label, e.g. multi_novel / gradual_decay
 
 # Edge-level attributes (new CSV elliptic_txs_edge_attributes.csv). RNG for amounts
 # comes from a separate derived stream — the structural stream (and hence the AC
@@ -51,6 +92,13 @@ edge_attributes:
     wash:       { amount: [1000, 20000], balance_tolerance: 0.05 }
     hub_spoke:  { amount: [50, 5000] }
     fanout:     { amount: [50, 5000] }
+    structuring:    { amount: [1, 500] }      # micro-deposits below reporting threshold
+    cycle_round_trip: { amount: [100, 10000] }
+    bridge_hopping: { amount: [500, 50000] }
+    amm_swap_chain: { amount: [10, 5000] }
+    exchange_hub:   { amount: [10, 3000] }
+    miner_payout:   { amount: [500, 50000] }
+    wallet_provider: { amount: [1, 200] }
     p2p:        { amount: [1, 1000] }
   timestamp_scale: 1200              # seconds: 1200 * (max(step_u, step_v) - 1)
 
@@ -58,12 +106,21 @@ edge_attributes:
 anchors:
   per_1000_nodes: 2                  # target anchor density
   min_anchor_distance: 3             # greedy isolation >= this (hops)
+  prefer_central_anchors: true       # pick the min-eccentricity node per instance (representative
+                                     # queries) instead of the block's first (often peripheral) node
   entity_types:
     mixer: wallet_mixer
     peel_chain: tumbler
     fanout: scam_propagator
     hub_spoke: exchange_hub
     wash: self_cycle
+    structuring: structuring_agent
+    cycle_round_trip: round_tripper
+    bridge_hopping: bridge_hopping_user
+    amm_swap_chain: amm_chain_trader
+    exchange_hub: exchange
+    miner_payout: miner
+    wallet_provider: wallet_provider
   k_hop_range: [1, 3]                # neighborhood hop lists recorded in the manifest
 
 # Background "search noise": detect accidental fan-in / cycle motifs in p2p edges.
@@ -73,6 +130,6 @@ background:
   cycle_max_depth: 4
 
 # Pattern-level holdout: tag instances whose temporal window overlaps an entry.
-# Pure annotation (no graph mutation) — `drift` still controls wash emission.
+# Pure annotation (no graph mutation) — `drift` still controls novel-scheme emission.
 holdout:
   entries: []                        # {pattern, step_min, step_max, train_excluded}

@@ -90,10 +90,99 @@ def build_wash(rng: np.random.Generator, params: dict[str, Any]) -> Scheme:
     return Scheme("wash", nodes, edges)
 
 
+def build_structuring(rng: np.random.Generator, params: dict[str, Any]) -> Scheme:
+    """Classic smurfing: one structurer fans out micro-deposits (below-threshold)."""
+    lo, hi = _range(params, "deposits_range", (5, 30))
+    deposits = _counts(rng, lo, hi)
+    nodes: list[dict[str, str]] = [{"role": "structurer", "cls": ILLICIT}]
+    nodes += [{"role": f"smurf_{i}", "cls": ILLICIT} for i in range(deposits)]
+    edges = [(0, i + 1) for i in range(deposits)]
+    return Scheme("structuring", nodes, edges)
+
+
+def build_cycle_round_trip(rng: np.random.Generator, params: dict[str, Any]) -> Scheme:
+    """Round-tripping: funds return to the originator through a closed cycle."""
+    lo, hi = _range(params, "hops_range", (3, 6))
+    hops = _counts(rng, lo, hi)
+    nodes = [{"role": f"round_trip_{i}", "cls": ILLICIT} for i in range(hops)]
+    edges = [(i, (i + 1) % hops) for i in range(hops)]
+    return Scheme("cycle_round_trip", nodes, edges)
+
+
+def build_bridge_hopping(rng: np.random.Generator, params: dict[str, Any]) -> Scheme:
+    """Bridge-hopping: source -> bridge -> target chain, repeated across bridges.
+
+    Topology is a path: entry -> bridge_in -> bridge_out -> ... -> recipient.
+    The intermediate bridge hops are the laundering core; entry/exit are ordinary txs.
+    """
+    lo, hi = _range(params, "bridges_range", (1, 3))
+    bridges = _counts(rng, lo, hi)
+    nodes: list[dict[str, str]] = [{"role": "bridge_user", "cls": LICIT}]
+    for i in range(bridges):
+        nodes.append({"role": f"bridge_in_{i}", "cls": ILLICIT})
+        nodes.append({"role": f"bridge_out_{i}", "cls": ILLICIT})
+    nodes.append({"role": "bridge_recipient", "cls": LICIT})
+    edges = [(i, i + 1) for i in range(len(nodes) - 1)]
+    return Scheme("bridge_hopping", nodes, edges)
+
+
+def build_amm_swap_chain(rng: np.random.Generator, params: dict[str, Any]) -> Scheme:
+    """Sequential swaps through AMM pools (asset conversion as laundering)."""
+    lo, hi = _range(params, "swaps_range", (2, 5))
+    swaps = _counts(rng, lo, hi)
+    nodes = [{"role": "amm_trader_0", "cls": ILLICIT}]
+    for i in range(swaps):
+        nodes.append({"role": f"amm_pool_{i}", "cls": ILLICIT})
+        nodes.append({"role": f"amm_trader_{i + 1}", "cls": ILLICIT})
+    edges = [(i, i + 1) for i in range(len(nodes) - 1)]
+    return Scheme("amm_swap_chain", nodes, edges)
+
+
+def build_exchange_hub(rng: np.random.Generator, params: dict[str, Any]) -> Scheme:
+    return _star(
+        rng, params, "exchange_hub", "exchange", LICIT, "client", LICIT, "clients_range", (20, 60)
+    )
+
+
+def build_miner_payout(rng: np.random.Generator, params: dict[str, Any]) -> Scheme:
+    return _star(
+        rng,
+        params,
+        "miner_payout",
+        "miner",
+        LICIT,
+        "payout_address",
+        LICIT,
+        "payouts_range",
+        (10, 40),
+    )
+
+
+def build_wallet_provider(rng: np.random.Generator, params: dict[str, Any]) -> Scheme:
+    return _star(
+        rng,
+        params,
+        "wallet_provider",
+        "provider",
+        LICIT,
+        "custody_address",
+        LICIT,
+        "addresses_range",
+        (10, 50),
+    )
+
+
 BUILDERS: dict[str, Callable[[np.random.Generator, dict[str, Any]], Scheme]] = {
     "mixer": build_mixer,
     "peel_chain": build_peel_chain,
     "fanout": build_fanout,
     "hub_spoke": build_hub_spoke,
     "wash": build_wash,
+    "structuring": build_structuring,
+    "cycle_round_trip": build_cycle_round_trip,
+    "bridge_hopping": build_bridge_hopping,
+    "amm_swap_chain": build_amm_swap_chain,
+    "exchange_hub": build_exchange_hub,
+    "miner_payout": build_miner_payout,
+    "wallet_provider": build_wallet_provider,
 }

@@ -10,11 +10,24 @@ import yaml
 
 @dataclass
 class DriftConfig:
+    """Temporal drift. Multiple novel schemes may surface simultaneously (multi-pattern drift).
+
+    `shutdown_rate_multiplier`: 0.0 = hard shutdown of non-novel illicit, 1.0 = nothing dies.
+    Gradual decay (partial drift) is modeled with values in (0, 1): late illicit schemes
+    survive with that probability instead of all-or-nothing shutdown.
+    """
+
     enabled: bool = False
     shutdown_step: int = 40
     shutdown_rate_multiplier: float = 0.0
     novel_step: int = 45
-    novel_scheme: str = "wash"
+    novel_schemes: list[str] = field(default_factory=lambda: ["wash"])
+    scenario: str | None = None  # optional human label, e.g. "multi_novel" / "gradual_decay"
+
+    @property
+    def novel_scheme(self) -> str:
+        """Legacy accessor: the first scheme of the novel set."""
+        return self.novel_schemes[0] if self.novel_schemes else ""
 
 
 DEFAULT_EDGE_AMOUNTS: dict[str, Any] = {
@@ -24,6 +37,13 @@ DEFAULT_EDGE_AMOUNTS: dict[str, Any] = {
     "hub_spoke": {"amount": [50.0, 5000.0]},
     "fanout": {"amount": [50.0, 5000.0]},
     "p2p": {"amount": [1.0, 1000.0]},
+    "structuring": {"amount": [1.0, 500.0]},
+    "cycle_round_trip": {"amount": [100.0, 10000.0]},
+    "bridge_hopping": {"amount": [500.0, 50000.0]},
+    "amm_swap_chain": {"amount": [10.0, 5000.0]},
+    "exchange_hub": {"amount": [10.0, 3000.0]},
+    "miner_payout": {"amount": [500.0, 50000.0]},
+    "wallet_provider": {"amount": [1.0, 200.0]},
 }
 
 DEFAULT_ENTITY_TYPES: dict[str, str] = {
@@ -32,6 +52,13 @@ DEFAULT_ENTITY_TYPES: dict[str, str] = {
     "fanout": "scam_propagator",
     "hub_spoke": "exchange_hub",
     "wash": "self_cycle",
+    "structuring": "structuring_agent",
+    "cycle_round_trip": "round_tripper",
+    "bridge_hopping": "bridge_hopping_user",
+    "amm_swap_chain": "amm_chain_trader",
+    "exchange_hub": "exchange",
+    "miner_payout": "miner",
+    "wallet_provider": "wallet_provider",
 }
 
 
@@ -49,6 +76,10 @@ class AnchorsConfig:
         default_factory=lambda: copy.deepcopy(DEFAULT_ENTITY_TYPES)
     )
     k_hop_range: list[int] = field(default_factory=lambda: [1, 3])
+    # Choose the most central node of each instance as its anchor (min eccentricity)
+    # instead of the first node of the block; keeps anchors representative (query nodes),
+    # not peripheral ends (e.g. peel_hop_0).
+    prefer_central_anchors: bool = True
 
 
 @dataclass
@@ -62,6 +93,19 @@ class BackgroundConfig:
 class HoldoutConfig:
     # each entry: {pattern, step_min, step_max, train_excluded}; empty => no windows
     entries: list[dict[str, Any]] = field(default_factory=list)
+
+
+@dataclass
+class FeatureConfig:
+    """Feature engine selection.
+
+    - `cdf`: inverse-CDF sampling from the real Elliptic marginals (historical profile,
+      inherits Elliptic anonymization and the 2016-2017 window — kept for backward compat);
+    - `semantic`: interpretable features computed from topology and edge attributes
+      (degrees, amounts, ages, aggregated flow), filling the same 167-column contract.
+    """
+
+    mode: str = "cdf"
 
 
 @dataclass
@@ -79,6 +123,7 @@ class GeneratorConfig:
     anchors: AnchorsConfig = field(default_factory=AnchorsConfig)
     background: BackgroundConfig = field(default_factory=BackgroundConfig)
     holdout: HoldoutConfig = field(default_factory=HoldoutConfig)
+    features: FeatureConfig = field(default_factory=FeatureConfig)
 
     @classmethod
     def from_yaml(cls, path: Path) -> GeneratorConfig:
@@ -89,6 +134,12 @@ class GeneratorConfig:
         anchors = raw.get("anchors") or {}
         background = raw.get("background") or {}
         holdout = raw.get("holdout") or {}
+        features = raw.get("features") or {}
+        novel_raw = drift.get("novel_schemes") or drift.get("novel_scheme")
+        if isinstance(novel_raw, str):
+            novel_schemes = [novel_raw]
+        else:
+            novel_schemes = list(novel_raw) if novel_raw else list(defaults.drift.novel_schemes)
         amount = copy.deepcopy(DEFAULT_EDGE_AMOUNTS)
         for key, value in (edges.get("amount") or {}).items():
             if isinstance(value, dict) and isinstance(amount.get(key), dict):
@@ -115,7 +166,8 @@ class GeneratorConfig:
                     drift.get("shutdown_rate_multiplier", defaults.drift.shutdown_rate_multiplier)
                 ),
                 novel_step=int(drift.get("novel_step", defaults.drift.novel_step)),
-                novel_scheme=str(drift.get("novel_scheme", defaults.drift.novel_scheme)),
+                novel_schemes=novel_schemes,
+                scenario=drift.get("scenario"),
             ),
             edge_attributes=EdgeAttributeConfig(
                 amount=amount,
@@ -130,6 +182,11 @@ class GeneratorConfig:
                 ),
                 entity_types=entity_types,
                 k_hop_range=list(anchors.get("k_hop_range", defaults.anchors.k_hop_range)),
+                prefer_central_anchors=bool(
+                    anchors.get(
+                        "prefer_central_anchors", defaults.anchors.prefer_central_anchors
+                    )
+                ),
             ),
             background=BackgroundConfig(
                 decoy_detection=bool(
@@ -143,6 +200,7 @@ class GeneratorConfig:
                 ),
             ),
             holdout=HoldoutConfig(entries=list(holdout.get("entries") or [])),
+            features=FeatureConfig(mode=str(features.get("mode", defaults.features.mode))),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -159,7 +217,8 @@ class GeneratorConfig:
                 "shutdown_step": self.drift.shutdown_step,
                 "shutdown_rate_multiplier": self.drift.shutdown_rate_multiplier,
                 "novel_step": self.drift.novel_step,
-                "novel_scheme": self.drift.novel_scheme,
+                "novel_schemes": self.drift.novel_schemes,
+                "scenario": self.drift.scenario,
             },
             "edge_attributes": {
                 "amount": self.edge_attributes.amount,
@@ -170,6 +229,7 @@ class GeneratorConfig:
                 "min_anchor_distance": self.anchors.min_anchor_distance,
                 "entity_types": self.anchors.entity_types,
                 "k_hop_range": self.anchors.k_hop_range,
+                "prefer_central_anchors": self.anchors.prefer_central_anchors,
             },
             "background": {
                 "decoy_detection": self.background.decoy_detection,
@@ -177,4 +237,5 @@ class GeneratorConfig:
                 "cycle_max_depth": self.background.cycle_max_depth,
             },
             "holdout": {"entries": self.holdout.entries},
+            "features": {"mode": self.features.mode},
         }
