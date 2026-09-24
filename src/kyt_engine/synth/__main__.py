@@ -43,7 +43,9 @@ def _generate(config_path: Path) -> None:
     print(f"Generated {len(graph.nodes)} txs, {len(graph.edges)} edges -> {config.out_dir}")
 
 
-def _validate(dir_path: Path) -> None:
+def _validate(
+    dir_path: Path, raw_dir: Path, run_distribution: bool, run_downstream_val: bool
+) -> None:
     from .validate import validate_dataset, validate_edge_attributes, validate_semantic_features
 
     manifest = json.loads((dir_path / "manifest.json").read_text())
@@ -59,6 +61,59 @@ def _validate(dir_path: Path) -> None:
         validate_semantic_features(dir_path)
         print("OK: semantic features consistent with edgelist/edge attributes")
 
+    if run_distribution:
+        report = run_distribution_checks(dir_path, raw_dir)
+        out = dir_path / "distribution_report.json"
+        out.write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")
+        print(f"OK: distribution fidelity report -> {out}")
+    if run_downstream_val:
+        report = run_downstream_validation(dir_path, raw_dir)
+        out = dir_path / "downstream_report.json"
+        out.write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")
+        print(f"OK: downstream transfer report -> {out}")
+
+    if not (run_distribution or run_downstream_val):
+        tip = "add --mmd and/or --downstream to validate against real Elliptic (needs data/raw)"
+        print(f"tip: {tip}")
+
+
+def run_distribution_checks(dir_path: Path, raw_dir: Path) -> dict:
+    from .distribution import (
+        distribution_report,
+        full_features_for_run,
+        load_raw_elliptic,
+        sample_raw_full_features,
+        structural_table,
+    )
+
+    manifest = json.loads((dir_path / "manifest.json").read_text())
+    raw = load_raw_elliptic(raw_dir)
+    rng = np.random.default_rng(distribution_seed)
+
+    mode = manifest.get("config", {}).get("features", {}).get("mode") or "cdf"
+    reports = {}
+    s_real, s_synth, names = structural_table(raw, dir_path)
+    reports["structural_shared"] = distribution_report(
+        s_real, s_synth, names, rng=rng
+    )
+    if mode == "cdf":
+        synth_full, feat_names = full_features_for_run(dir_path)
+        real_full = sample_raw_full_features(raw, rng=rng)
+        reports["cdf_full_165"] = distribution_report(
+            real_full, synth_full, feat_names[:165], rng=rng
+        )
+    return {"feature_mode": mode, "reports": reports}
+
+
+def run_downstream_validation(dir_path: Path, raw_dir: Path) -> dict:
+    from .downstream import run_downstream
+
+    return run_downstream(dir_path, raw_dir, seed=downstream_seed)
+
+
+distribution_seed = 1
+downstream_seed = 2
+
 
 def main() -> None:
     parser = argparse.ArgumentParser(prog="kyt_engine.synth")
@@ -67,11 +122,16 @@ def main() -> None:
     g.add_argument("--config", default="configs/generator.yaml")
     v = sub.add_parser("validate", help="Check a dataset against the format contract")
     v.add_argument("--dir", default="data/synthetic/run")
+    v.add_argument("--raw-dir", default="data/raw", help="dir with real Elliptic txs (raw data)")
+    v.add_argument("--mmd", action="store_true",
+                   help="MMD/copula distribution fidelity vs real Elliptic (needs data/raw)")
+    v.add_argument("--downstream", action="store_true",
+                   help="RF transfer to held-out real Elliptic with F1/PR-AUC/ECE report")
     args = parser.parse_args()
     if args.cmd == "generate":
         _generate(Path(args.config))
     elif args.cmd == "validate":
-        _validate(Path(args.dir))
+        _validate(Path(args.dir), Path(args.raw_dir), args.mmd, args.downstream)
 
 
 if __name__ == "__main__":

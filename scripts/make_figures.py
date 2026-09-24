@@ -27,7 +27,22 @@ CLASS_COLORS = {"illicit": "#d62828", "licit": "#2a9d43", "unknown": "#8d99ae"}
 CLASS_LABELS = {"illicit": "illicit (1)", "licit": "licit (2)", "unknown": "unknown"}
 LAYER_COLORS = ["#ece2f0", "#d4b9da", "#c994c7", "#df65b0", "#dd1c77"]  # 0..3+ hops
 
-sn_schemes = ["mixer", "peel_chain", "fanout", "hub_spoke", "wash", "structuring"]
+sn_schemes = [
+    "mixer",
+    "peel_chain",
+    "fanout",
+    "hub_spoke",
+    "structuring",
+    "cycle_round_trip",
+    "bridge_hopping",
+    "amm_swap_chain",
+    "stealth_use",
+    "lending_laundry",
+    "exchange_hub",
+    "miner_payout",
+    "wallet_provider",
+    "wash",
+]
 
 FIGDIR = Path("artifacts/figures")
 
@@ -116,11 +131,20 @@ def _build_instances_for_figure() -> tuple[list, dict[int, dict], dict, int]:
             "hub_spoke": {"n_instances": 2, "spokes_range": (6, 10)},
             "wash": {"n_instances": 2, "cycle_len_range": (4, 6)},
             "structuring": {"n_instances": 2, "deposits_range": (5, 9)},
+            "cycle_round_trip": {"n_instances": 2, "hops_range": (3, 6)},
+            "bridge_hopping": {"n_instances": 2, "bridges_range": (1, 3)},
+            "amm_swap_chain": {"n_instances": 2, "swaps_range": (2, 5)},
+            "exchange_hub": {"n_instances": 1, "clients_range": (10, 20)},
+            "miner_payout": {"n_instances": 1, "payouts_range": (8, 12)},
+            "wallet_provider": {"n_instances": 1, "addresses_range": (8, 12)},
+            "stealth_use": {"n_instances": 2, "stealth_range": (5, 10)},
+            "lending_laundry": {"n_instances": 2, "rounds_range": (1, 2)},
         },
         p2p_edges_per_tx=1.2,
     )
     cfg.drift.enabled = True
     cfg.drift.shutdown_step = 40
+    cfg.drift.shutdown_rate_multiplier = 1.0
     cfg.drift.novel_schemes = ["wash"]
     cfg.drift.novel_step = 45
     stats = EllipticStats(cfg.stats_dir)
@@ -132,7 +156,16 @@ def _build_instances_for_figure() -> tuple[list, dict[int, dict], dict, int]:
 
 def _scheme_layout_ordered(scheme: str, n: int) -> list[np.ndarray]:
     pos: list[tuple[float, float]] = [(0.0, 0.0)]
-    if scheme in ("fanout", "hub_spoke", "structuring"):
+    if scheme in (
+        "fanout",
+        "hub_spoke",
+        "structuring",
+        "stealth_use",
+        "lending_laundry",
+        "exchange_hub",
+        "miner_payout",
+        "wallet_provider",
+    ):
         for i in range(1, n):
             ang = 2 * np.pi * (i - 1) / max(n - 1, 1)
             pos.append((1.4 * np.cos(ang), 1.4 * np.sin(ang)))
@@ -163,9 +196,9 @@ def fig_scheme_topologies(out: Path) -> None:
     classes = {nd.tx_id: nd.cls for nd in graph.nodes}
     roles = {nd.tx_id: nd.role for nd in graph.nodes}
 
-    cols = 3
+    cols = 5
     rows = (len(sn_schemes) + cols - 1) // cols
-    fig, axes = plt.subplots(rows, cols, figsize=(9.5, 4.6 * len(sn_schemes) // cols + 0.4))
+    fig, axes = plt.subplots(rows, cols, figsize=(3.2 * cols, 3.0 * rows))
     axes = np.array(axes).reshape(-1)
     for k, scheme in enumerate(sn_schemes):
         ax = axes[k]
@@ -188,23 +221,23 @@ def fig_scheme_topologies(out: Path) -> None:
         )
         nx.draw_networkx_nodes(
             G, pos, ax=ax, node_color=[node_colors[t] for t in node_ids],
-            node_size=180, linewidths=0.7, edgecolors="white",
+            node_size=130, linewidths=0.7, edgecolors="white",
         )
         anchor = inst.anchor_node_id
         if anchor in local:
-            ax.scatter(*pos[anchor], marker="*", s=420, c=CLASS_COLORS[classes[anchor]],
+            ax.scatter(*pos[anchor], marker="*", s=360, c=CLASS_COLORS[classes[anchor]],
                        edgecolors="k", linewidths=0.8, zorder=5)
         core = node_ids[0]
         if core in pos and roles[core]:
-            ax.text(pos[core][0], pos[core][1] + 0.35, roles[core], ha="center",
-                    fontsize=7, color="#333333")
-        ax.set_title(f"(b-{k + 1}) {scheme}", fontsize=9.5)
+            ax.text(0.02, 0.02, roles[core], transform=ax.transAxes, ha="left",
+                    va="bottom", fontsize=6.5, color="#333333")
+        ax.set_title(f"(b-{k + 1}) {scheme}", fontsize=8.5)
         ax.set_axis_off()
     for k in range(len(sn_schemes), len(axes)):
         axes[k].set_axis_off()
     fig.suptitle("Planted laundering / licit subgraphs (nodes colored by class, * = retrieval anchor, edge width ~ amount)",
-                 fontsize=10, y=1.0)
-    fig.tight_layout(rect=[0, 0, 1, 0.98])
+                 fontsize=9, y=0.98)
+    fig.tight_layout(rect=[0, 0, 1, 0.96], h_pad=0.6, w_pad=0.4)
     fig.savefig(out / "fig_scheme_topologies.png")
     plt.close(fig)
 

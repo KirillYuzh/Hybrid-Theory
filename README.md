@@ -37,10 +37,10 @@
 
 Опциональные схемы современного ландшафта (включаются `n_instances > 0`; по умолчанию 0, чтобы эталонный прогон не сдвигался):
 
-- illicit: `structuring` (smurfing под порогами), `cycle_round_trip` (возврат средств по циклу), `bridge_hopping` (кросс-чейн: вход → мост → ... → получатель), `amm_swap_chain` (последовательные свопы через пулы);
+- illicit: `structuring` (smurfing под порогами), `cycle_round_trip` (возврат средств по циклу), `bridge_hopping` (кросс-чейн: вход → мост → ... → получатель), `amm_swap_chain` (последовательные свопы через пулы), `stealth_use` (stealth-платежи: illicit-оператор → `stealth_addr_*`-адреса, star-топология), `lending_laundry` (lending-as-laundering: illicit-заёмщик → licit-пулы — циклы `deposit → draw → repay → release`, пул балансируется **точно**: `sum(deposit) + sum(repay) == sum(draw) + sum(release)`);
 - licit: `exchange_hub`, `miner_payout`, `wallet_provider` — лицензитные сущности с осмысленной семантикой (в отличие от фона p2p).
 
-Поддерживаемые публичные typologies: mixer, peel chain, fanout/scam, wash-trading, structuring/smurfing, round-trip, bridge-hopping, AMM-цепочки. Не покрыты пока: agentic-микроразбиение, stealth-адреса, pre-funding миксеров, lending-as-laundering, контролируемые licit-negative (стикинг-пул/арбитраж) — см. «Ограничения».
+Поддерживаемые публичные typologies: mixer, peel chain, fanout/scam, wash-trading, structuring/smurfing, round-trip, bridge-hopping, AMM-цепочки, stealth-платежи, lending-as-laundering. Не покрыты пока: agentic-микроразбиение, pre-funding миксеров, контролируемые licit-negative (стикинг-пул/арбитраж) — см. «Ограничения».
 
 ## Пропорции (бюджеты)
 
@@ -67,23 +67,38 @@
 
 Проверенный сценарий: `shutdown_step: 40`, `shutdown_rate_multiplier: 0.0`, `novel_step: 45` — novel-схемы строго на 45–49, старый illicit только до шага 40.
 
-## Ограничения (честно)
+## Валидация качества и downstream
+
+Помимо формального контракта, `validate` умеет сверять синтетику с настоящим Elliptic — но для этого нужны его raw-файлы в `data/raw/` (gitignored):
+
+```bash
+python -m kyt_engine.synth validate --dir data/synthetic/run --mmd --downstream
+```
+
+Сверка ведётся в **общем структурном подпространстве** (`features_structural.py`: in/out степени, уникальные соседи, наличие входящих/исходящих рёбер, нормализованный шаг) — оно считается по edgelist + time_step и для синтетики, и для реальных данных (суммы не нужны):
+
+- **`--mmd`** → `distribution_report.json`. Для каждой колонки — univariate MMD² (biased), статистика **bivariate MMD² в copula-пространстве** (ранги, фиксирует расхождение зависимостей, а не маргиналов) и **correlation gap** (средний |Δ|-Spearman). Всегда рядом отчёт `synthetic_vs_own_split` (разбиение синтетики пополам) как «шумовая база»; правило здоровья: `ratio = synthetic_vs_real / own_split < 2`. При `features.mode: cdf` дополнительно тот же отчёт по полному 165-мерному пространству фич.
+- **`--downstream`** → `downstream_report.json`. RF (200 деревьев) на train-хвосте (шаги ≤30), качество на тесте (шаги ≥41): внутренний тест синтетики, **трансфер синтетика→реальный Elliptic** и «оракул» (RF, обученный на реальном train). Решение — `transfer_f1_gap` = F1(оракул) − F1(трансфер); `abs(gap) ≤ 0.05` трактуется как «в пределах спреда генератора». Метрики F1 / PR-AUC / ECE по каждому сценарию.
+
+**Почему такой гранулярности достаточно (rationale).** Цель — не POST-воспроизведение 165 маргиналов, а валидация «схем + retrieval + трансфер на тот же downstream-бенчмарк, что у реальных данных». Для этого хватает (а) общего структурного пространства, в котором генератор обязан совпасть с Elliptic по маргиналам и зависимостям, и (b) downstream-сплита train ≤30 / valid 31–40 / test ≥41 — честный аналог hold-out «невидимой» выборки Elliptic. Полное 165-мерное пространство сравнивается только в `cdf`-режиме (и на нём тяжело претендовать на «похожесть» — см. «Ограничения»).
+
+## Ограничения
 
 Проект — инструмент для **контролируемых** экспериментов retrieval + GBDT (в духе Spillety), а не замена реальных размеченных данных. Что он не делает:
 
 - **`cdf`-режим наследует пороки Elliptic**: анонимизацию фич и окно 2016–2017; «генерация» в этом режиме — во многом ресэмплинг маргиналов Elliptic с известным заранее ground truth. Joint-распределения (корреляции между фичами) не контролируются;
-- **Совместные фичи не валидируются**: MMD, correlation-matrix distance и KS-тесты против реальных данных не встроены (нужен доступ к raw-фичам Elliptic + эксперимент); в `semantic`-режиме сверяются только согласованность с топологией/атрибутами;
+- **Худшие честные числа**: на суррогатной валидации (полный 165-мерный отчёт в `cdf`-режиме и структурное подпространство) синтетика пока заметно дальше от реальных данных, чем own-split-шум — correlation gap в 10× больше базы в `cdf`-пространстве, а transfer-F1 на реальном тесте невысок. Это ожидаемо: маргиналы-копии Elliptic не дают ни корреляций, ни перфорации «из коробки»; отчёт честно это показывает;
 - **`p2p` фон — структурный шум**, а не семантический licit: «licit» не означает «реальная биржа», поэтому модель может выучить «licit = случайные рёбра»; явные licit-схемы (`exchange_hub`, `miner_payout`, `wallet_provider`) нужно включать вручную;
 - **Decoys** — детектированные случайные мотивы фона, а не контролируемые негативные примеры (стикинг-пул, DEX-арбитраж). Такие licit-negative пока не генерируются;
-- **Downstream-валидация отсутствует**: нет эксперимента «обучить RF на синтетике → проверить на held-out Elliptic» (или few-shot transfer), поэтому переносимость на реальные данные не доказана;
-- **Покрытые схемы** — классические (mixer, peel, fanout, wash, structuring, round-trip, bridge-hopping, AMM-цепочки); agentic/stealth/prefunding/lending-схемы и контролируемые licit-negative ещё не реализованы;
+- **Downstream-валидация — суррогат**, не proof: RF на структурном подпространстве решает упрощённую задачу, а честные пороги (`≤ 0.05` gap) ещё не калибровались на бОльшей сетке конфигов;
+- **Покрытые схемы** — классические (mixer, peel, fanout, wash, structuring, round-trip, bridge-hopping, AMM-цепочки) + stealth-платежи и lending-as-laundering; agentic-микроразбиение, pre-funding и контролируемые licit-negative ещё не реализованы;
 - **`semantic`-режим** осмысленен, но его производные колонки (24..164) не соответствуют распределению Elliptic — их нельзя использовать для оценки «похожести» на реальные данные.
 
-Реалистичные следующие шаги: copula/VAE-фичи с joint-валидацией, сценарии дрифта как конфиги, контролируемые decoys и downstream-эксперимент.
+Реалистичные следующие шаги: copula/VAE-фичи с joint-валидацией, калибровка честного порога transfer-gap, контролируемые decoys и few-shot transfer на больших конфиг-сетках.
 
 ## Визуализация датасета
 
-Фигуры ниже снимаются с эталонного прогона (`configs/generator.yaml`, seed 42) одним скриптом `scripts/make_figures.py` (seaborn + matplotlib + networkx; `pip install seaborn networkx` → `python scripts/make_figures.py`). Единственное исключение — **Рис. 2**: для схем, которых нет в эталонном прогоне с выключенным дрифтом (wash), скрипт строит небольшой дрифтовый конфиг в памяти (без записи датасета) и рисует топологии из него.
+Фигуры 1, 3, 4 и 5 снимаются с эталонного прогона (`configs/generator.yaml`, seed 42), **Рис. 2** — топологии посаженных подграфов — рисуется из отдельного конфига в памяти, где включён весь набор схем (классические, современные laundering-паттерны, stealth-платежи, lending-as-laundering и licit-сущности; `wash` появляется только в хвосте временной шкалы, как и положено дрифту). Скрипт: `scripts/make_figures.py` (seaborn + matplotlib + networkx; `pip install seaborn networkx` → `python scripts/make_figures.py`).
 
 ![Временной профиль классов](artifacts/figures/fig_temporal_classes.png)
 
@@ -91,7 +106,7 @@
 
 ![Посаженные схемы](artifacts/figures/fig_scheme_topologies.png)
 
-*Рис. 2. Посаженные подграфы-схемы: цвет узла — класс (красный — illicit, зелёный — licit), звезда — retrieval-якорь, толщина ребра ~ лог-сумма.*
+*Рис. 2. Посаженные подграфы-схемы: цвет узла — класс (красный — illicit, зелёный — licit), звезда — retrieval-якорь, толщина ребра ~ лог-сумма; подпись в углу панели — роль ключевого узла.*
 
 ![Суммы рёбер по схемам](artifacts/figures/fig_amounts_by_scheme.png)
 
@@ -122,6 +137,11 @@ python -m kyt_engine.synth generate --config configs/generator.yaml
 
 # 3. Проверить, что датасет собран по контракту
 python -m kyt_engine.synth validate --dir data/synthetic/run
+
+# 4. Валидация качества против настоящего Elliptic (нужны data/raw/elliptic_txs_*.csv):
+#    --mmd        -> distribution_report.json  (MMD², copula, correlation gap)
+#    --downstream -> downstream_report.json    (RF-трансфер на held-out Elliptic)
+python -m kyt_engine.synth validate --dir data/synthetic/run --raw-dir data/raw --mmd --downstream
 ```
 
 Детерминизм: одинаковый `seed` + одинаковый конфиг -> байт-в-байт одинаковые файлы (включая manifest).
@@ -147,11 +167,13 @@ Hybrid-Theory/
 │       ├── anchors.py              # инстансы, edge-атрибуты, якоря, K-hop, decoy, holdout
 │       ├── features.py             # фиче-матрица (cdf-режим) по классам
 │       ├── features_semantic.py    # фиче-матрица (semantic-режим): из топологии/атрибутов
+│       ├── features_structural.py  # общее 7-колоночное структурное подпространство (синт. + raw)
+│       ├── distribution.py         # MMD²/copula/correlation-gap против raw Elliptic
+│       ├── downstream.py           # RF-трансфер: F1/PR-AUC/ECE на held-out реальном тесте
 │       ├── emit.py                 # 4 CSV + manifest.json (sha256, ground truth, retrieval)
 │       ├── validate.py             # контракт-валидатор + семантическая сверка
-│       └── __main__.py             # CLI: generate | validate
-├── tests/test_synth.py
-└── TASKS/pivot-to-synthetic-data/  # артефакты задачи
+│       └── __main__.py             # CLI: generate | validate (--mmd/--downstream/--raw-dir)
+└── tests/test_synth.py
 ```
 
 ## Тесты

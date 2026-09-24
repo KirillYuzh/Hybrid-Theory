@@ -122,7 +122,12 @@ EDGE_RECIPES: dict[str, str] = {
     "exchange_hub": "exchange",
     "miner_payout": "payout",
     "wallet_provider": "custody",
+    "stealth_use": "stealth_pay",
+    "lending_laundry": "loan",
 }
+
+# lending edges alternate deposit, draw, repay, release per pool in this fixed order.
+LENDING_ROLE_CYCLE = ("loan_deposit", "loan_draw", "loan_repay", "loan_release")
 
 
 def _edge_recipe(pattern_type: str, edge: tuple[int, int], anchor: int) -> str:
@@ -158,7 +163,12 @@ def build_instances(graph: GeneratedGraph, config: GeneratorConfig) -> list[Patt
             else node_ids[0]
         )
         steps = [graph.nodes[n].step for n in node_ids]
-        recipe = {e: _edge_recipe(run.name, graph.edges[e], anchor) for e in edge_ids}
+        recipe = {}
+        for pos, e in enumerate(edge_ids):
+            if run.name == "lending_laundry":
+                recipe[e] = LENDING_ROLE_CYCLE[pos % len(LENDING_ROLE_CYCLE)]
+            else:
+                recipe[e] = _edge_recipe(run.name, graph.edges[e], anchor)
         instances.append(
             PatternInstance(
                 instance_id=len(instances),
@@ -276,7 +286,23 @@ def build_edge_attributes(
             e = inst.edge_ids[-1]  # closing edge returns to the start -> every node balances
             u, v = graph.edges[e]
             attrs[e] = entry(u, v, base)
-        else:  # fanout / hub_spoke star
+        elif pattern == "lending_laundry":
+            margin_lo, margin_hi = conf.get("margin_fraction", [0.1, 0.3])
+            for e in inst.edge_ids:
+                role = inst.edge_attr_recipe[e]
+                u, v = graph.edges[e]
+                if role == "loan_deposit":
+                    deposit = _uniform_cents(rng, *conf["amount"])
+                    margin = rng.uniform(margin_lo, margin_hi)
+                    attrs[e] = entry(u, v, deposit)
+                elif role == "loan_draw":
+                    draw = max(1, int(round(deposit * (1.0 - margin))))
+                    attrs[e] = entry(u, v, draw)
+                elif role == "loan_repay":
+                    attrs[e] = entry(u, v, draw)  # borrower repays the drawn amount
+                else:  # loan_release: pool returns the full collateral
+                    attrs[e] = entry(u, v, deposit)
+        else:  # fanout / hub_spoke / stealth_use star
             for e in inst.edge_ids:
                 u, v = graph.edges[e]
                 attrs[e] = entry(u, v, _uniform_cents(rng, *conf["amount"]))
