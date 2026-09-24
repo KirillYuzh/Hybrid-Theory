@@ -590,3 +590,139 @@ def test_validate_missing_raw_messages(tmp_path: Path, stats_dir: Path) -> None:
     empty.mkdir()
     with pytest.raises(FileNotFoundError, match="raw Elliptic data missing"):
         _check_raw(empty)
+
+
+def _fake_raw_big(tmp_path: Path, n: int = 3000) -> Path:
+    raw = tmp_path / "raw_big"
+    raw.mkdir()
+    txid = np.arange(n)
+    ts = np.sort(np.random.default_rng(4).integers(1, 50, size=n))
+    signal = np.random.default_rng(8).normal(size=n) + 0.8 * (ts > 40)
+    pd.DataFrame(np.column_stack([txid, ts, signal])).to_csv(
+        raw / "elliptic_txs_features.csv", header=False, index=False
+    )
+    classes = np.random.default_rng(5).choice(["1", "2", "unknown"], size=n, p=[0.12, 0.38, 0.50])
+    pd.DataFrame({"txId": txid, "class": classes}).to_csv(
+        raw / "elliptic_txs_classes.csv", index=False
+    )
+    g = np.random.default_rng(6)
+    u = g.integers(0, n, size=3 * n)
+    v = g.integers(0, n, size=3 * n)
+    edg = pd.DataFrame({"txId1": u, "txId2": v})
+    edg[edg["txId1"] != edg["txId2"]].to_csv(
+        raw / "elliptic_txs_edgelist.csv", index=False
+    )
+    return raw
+
+
+def test_split_policy_is_temporal_only() -> None:
+    from kyt_engine.synth.experiments import PERIODS, SPLIT_POLICY, TRAIN_MAX
+
+    assert SPLIT_POLICY["split"] == "temporal by time_step; random splits are forbidden"
+    assert TRAIN_MAX == 30
+    assert PERIODS == {"pre_shift": (31, 40), "post_novel": (45, 49), "test_all": (41, 49)}
+    contract = SPLIT_POLICY["preprocessing_contract"]
+    assert any("fit on the training period only" in item for item in contract)
+
+
+def test_welch_ttest_detects_and_rejects() -> None:
+    from kyt_engine.synth.experiments import welch
+
+    strong = welch([0.10, 0.11, 0.12, 0.13, 0.14], [0.50, 0.52, 0.48, 0.51, 0.49])
+    assert strong["significant"] is True
+    assert strong["p"] < 0.05
+    weak = welch([0.20, 0.21, 0.19, 0.20, 0.21], [0.205, 0.195, 0.21, 0.20, 0.198])
+    assert weak["significant"] is False
+    same = welch([0.3, 0.3, 0.3], [0.3, 0.3, 0.3])
+    assert same["p"] is None and same["significant"] is False
+
+
+def test_standardize_fits_train_only() -> None:
+    from kyt_engine.synth.experiments import standardize
+
+    train = np.array([[0.0], [2.0]])
+    other = {"test": np.array([[10.0], [20.0]])}
+    out = standardize(train, other)["test"]
+    assert np.allclose(out, [[9.0], [19.0]])
+    assert abs(out.mean()) > 1.0
+
+
+def test_graph_conv_predicts_masked_rows() -> None:
+    from scipy import sparse
+
+    from kyt_engine.synth.experiments import GraphConvClassifier
+
+    rng = np.random.default_rng(0)
+    X = rng.normal(size=(60, 3))
+    A = sparse.eye(60, format="csr")
+    y = (X[:, 0] > 0).astype(float)
+    train = np.zeros(60, dtype=bool)
+    train[:30] = True
+    model = GraphConvClassifier(hops=1, max_iter=100, seed=0).fit(X, y, A, train)
+    test = ~train
+    proba = model.predict_proba(X, A, test)
+    assert proba.shape == (30, 2)
+    assert ((proba >= 0) & (proba <= 1)).all()
+    assert np.allclose(proba.sum(axis=1), 1.0, atol=1e-6)
+
+
+def test_protocol_replicates_seeds_and_periods(tmp_path: Path, stats_dir: Path) -> None:
+    from kyt_engine.synth.experiments import run_protocol
+
+    raw = _fake_raw_big(tmp_path)
+    rep = run_protocol(
+        None, raw, seeds=[0, 1], space="structural", n_estimators=20,
+        with_attribution=False, n_txs=900, stats_dir=stats_dir,
+    )
+    assert rep["n_seeds"] == 2
+    assert rep["scenario"] == "streaming_drift"
+    assert set(rep["models"]) >= {"rf", "graph_conv", "ensemble"}
+    assert [e["seed"] for e in rep["per_seed"]] == [0, 1]
+    for period in ("pre_shift", "post_novel", "test_all"):
+        assert period in rep["periods"]
+        for entry in rep["per_seed"]:
+            assert period in entry["transfer_to_real"]
+            assert "f1" in entry["transfer_to_real"][period]["rf"]
+    for model, test in rep["shift_tests"].items():
+        assert test["welch_post_vs_pre"]["n_a"] == 2
+        assert "degradation" in test
+    assert rep["protocol"]["split"].startswith("temporal")
+
+
+def test_fragmentation_sweep_reports_curve(tmp_path: Path, stats_dir: Path) -> None:
+    from kyt_engine.synth.experiments import run_fragmentation_sweep
+
+    raw = _fake_raw_big(tmp_path)
+    rep = run_fragmentation_sweep(
+        None, raw, seeds=[0], labeled_ratios=[0.10, 0.30], space="structural",
+        n_estimators=20, n_txs=900, stats_dir=stats_dir,
+    )
+    assert [c["labeled_ratio"] for c in rep["curve"]] == [0.10, 0.30]
+    assert set(rep["degradation_vs_best"]) == {"0.1", "0.3"}
+    assert all("n_labeled" in c["per_seed"][0] for c in rep["curve"])
+    assert rep["sweep"] == "labeled_ratio"
+
+
+def test_supervision_sweep_subsamples_labels(tmp_path: Path, stats_dir: Path) -> None:
+    import numpy as np
+
+    from kyt_engine.synth.experiments import _stratified_subsample, run_fragmentation_sweep
+
+    labels = np.array([0.0, 1.0, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0])
+    mask = np.ones(8, dtype=bool)
+    full = _stratified_subsample(labels, mask, 1.0, seed=0)
+    half = _stratified_subsample(labels, mask, 0.5, seed=0)
+    assert full.all()
+    assert half.sum() == 4
+    assert set(labels[half].tolist()) == {0.0, 1.0}
+
+    raw = _fake_raw_big(tmp_path)
+    rep = run_fragmentation_sweep(
+        None, raw, seeds=[0], labeled_ratios=[0.23], supervision_fractions=[0.25, 1.0],
+        space="structural", dimension="supervision", n_estimators=20, n_txs=900,
+        stats_dir=stats_dir,
+    )
+    assert rep["sweep"] == "supervision"
+    small, large = rep["curve"][0]["per_seed"][0], rep["curve"][1]["per_seed"][0]
+    assert small["n_supervised"] < large["n_supervised"]
+    assert small["n_supervised_illicit"] <= small["n_labeled_illicit"]

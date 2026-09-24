@@ -73,6 +73,11 @@ def _metrics(y_true: np.ndarray, proba: np.ndarray) -> dict:
     }
 
 
+def classification_metrics(y_true: np.ndarray, proba: np.ndarray) -> dict:
+    """F1 / PR-AUC / ECE for a positive class probability vector (public entry point)."""
+    return _metrics(y_true, proba)
+
+
 def _structural_pipeline(
     edgelist: pd.DataFrame, time_step: pd.Series, classes: pd.DataFrame
 ) -> pd.DataFrame:
