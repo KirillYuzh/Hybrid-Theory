@@ -172,6 +172,37 @@ def build_wallet_provider(rng: np.random.Generator, params: dict[str, Any]) -> S
     )
 
 
+def build_stealth_use(rng: np.random.Generator, params: dict[str, Any]) -> Scheme:
+    """Stealth-address receivable (modern darknet funds handling).
+
+    One payer sweeps into N one-time stealth addresses; all addresses are controlled
+    by the same operator (illicit), so they circle cash past address-based attribution.
+    """
+    lo, hi = _range(params, "stealth_range", (5, 30))
+    addrs = _counts(rng, lo, hi)
+    nodes: list[dict[str, str]] = [{"role": "stealth_payer", "cls": ILLICIT}]
+    nodes += [{"role": f"stealth_addr_{i}", "cls": ILLICIT} for i in range(addrs)]
+    edges = [(0, i + 1) for i in range(addrs)]
+    return Scheme("stealth_use", nodes, edges)
+
+
+def build_lending_laundry(rng: np.random.Generator, params: dict[str, Any]) -> Scheme:
+    """Lending-as-laundering: deposit dirty funds as collateral, draw a clean loan,
+    repay it, withdraw the collateral. Four directed edges per round between the
+    debtor (illicit) and one lending pool (licit): deposit, draw, repay, release.
+    The pool's inflows (deposit + repay) match its outflows (draw + release) exactly.
+    """
+    lo, hi = _range(params, "rounds_range", (1, 3))
+    rounds = _counts(rng, lo, hi)
+    nodes: list[dict[str, str]] = [{"role": "debtor", "cls": ILLICIT}]
+    edges: list[tuple[int, int]] = []
+    for r in range(rounds):
+        pool = r + 1
+        nodes.append({"role": f"lending_pool_{r}", "cls": LICIT})
+        edges.extend([(0, pool), (pool, 0), (0, pool), (pool, 0)])
+    return Scheme("lending_laundry", nodes, edges)
+
+
 BUILDERS: dict[str, Callable[[np.random.Generator, dict[str, Any]], Scheme]] = {
     "mixer": build_mixer,
     "peel_chain": build_peel_chain,
@@ -185,4 +216,6 @@ BUILDERS: dict[str, Callable[[np.random.Generator, dict[str, Any]], Scheme]] = {
     "exchange_hub": build_exchange_hub,
     "miner_payout": build_miner_payout,
     "wallet_provider": build_wallet_provider,
+    "stealth_use": build_stealth_use,
+    "lending_laundry": build_lending_laundry,
 }

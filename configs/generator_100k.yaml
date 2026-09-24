@@ -41,6 +41,8 @@ schemes:
   exchange_hub: { n_instances: 0, clients_range: [20, 60] }
   miner_payout: { n_instances: 0, payouts_range: [10, 40] }
   wallet_provider: { n_instances: 0, addresses_range: [10, 50] }
+  stealth_use: { n_instances: 0, stealth_range: [5, 30] }
+  lending_laundry: { n_instances: 0, rounds_range: [1, 3] }
 
 # p2p background: random directed edges between ordinary txs (no connectivity guarantee).
 p2p_edges_per_tx: 1.5
@@ -66,6 +68,8 @@ edge_attributes:
     wash:       { amount: [1000, 20000], balance_tolerance: 0.05 }
     hub_spoke:  { amount: [50, 5000] }
     fanout:     { amount: [50, 5000] }
+    stealth_use: { amount: [500, 20000] }
+    lending_laundry: { amount: [2000, 50000], margin_fraction: [0.10, 0.30] }
     p2p:        { amount: [1, 1000] }
   timestamp_scale: 1200              # seconds: 1200 * (max(step_u, step_v) - 1)
 
@@ -87,6 +91,8 @@ anchors:
     exchange_hub: exchange
     miner_payout: miner
     wallet_provider: wallet_provider
+    stealth_use: stealth_address_operator
+    lending_laundry: debtor
   k_hop_range: [1, 3]                # neighborhood hop lists recorded in the manifest
 
 # Background "search noise": detect accidental fan-in / cycle motifs in p2p edges.

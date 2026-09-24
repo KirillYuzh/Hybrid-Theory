@@ -44,6 +44,8 @@ DEFAULT_EDGE_AMOUNTS: dict[str, Any] = {
     "exchange_hub": {"amount": [10.0, 3000.0]},
     "miner_payout": {"amount": [500.0, 50000.0]},
     "wallet_provider": {"amount": [1.0, 200.0]},
+    "stealth_use": {"amount": [500.0, 20000.0]},
+    "lending_laundry": {"amount": [2000.0, 50000.0], "margin_fraction": [0.10, 0.30]},
 }
 
 DEFAULT_ENTITY_TYPES: dict[str, str] = {
@@ -59,6 +61,8 @@ DEFAULT_ENTITY_TYPES: dict[str, str] = {
     "exchange_hub": "exchange",
     "miner_payout": "miner",
     "wallet_provider": "wallet_provider",
+    "stealth_use": "stealth_address_operator",
+    "lending_laundry": "debtor",
 }
 
 

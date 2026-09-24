@@ -434,3 +434,159 @@ def test_anchor_centrality(stats_dir: Path) -> None:
     instances2 = build_instances(graph, cfg)
     peel2 = [i for i in instances2 if i.pattern_type == "peel_chain"]
     assert all(i.anchor_role == "peel_hop_0" for i in peel2)
+
+
+def test_new_schemes_stealth_and_lending(stats_dir: Path) -> None:
+    cfg = _small_config(stats_dir)
+    cfg.schemes.update(
+        {
+            "stealth_use": {"n_instances": 3, "stealth_range": (4, 8)},
+            "lending_laundry": {"n_instances": 3, "rounds_range": (1, 2)},
+        }
+    )
+    _run(cfg)
+    validate_edge_attributes(cfg.out_dir)
+    manifest = json.loads((cfg.out_dir / "manifest.json").read_text())
+    types = {i["pattern_type"] for i in manifest["instance_ground_truth"]}
+    assert {"stealth_use", "lending_laundry"} <= types
+    by_type = {i["pattern_type"]: i for i in manifest["instance_ground_truth"]}
+    for t, illicit_role, licit_role, entity in (
+        ("stealth_use", "stealth_payer", "stealth_addr_0", "stealth_address_operator"),
+        ("lending_laundry", "debtor", "lending_pool_0", "debtor"),
+    ):
+        inst = by_type[t]
+        roles = {
+            gt["role"]
+            for gt in manifest["ground_truth"]
+            if gt["instance_id"] == inst["instance_id"]
+        }
+        assert illicit_role in roles
+        assert licit_role in roles
+        assert inst["entity_type"] == entity
+
+
+def test_lending_pool_balanced_and_margin(stats_dir: Path) -> None:
+    cfg = _small_config(stats_dir)
+    cfg.schemes.update({"lending_laundry": {"n_instances": 2, "rounds_range": (1, 2)}})
+    _run(cfg)
+    manifest = json.loads((cfg.out_dir / "manifest.json").read_text())
+    edge_gt = manifest["edge_attribute_ground_truth"]
+    by_inst: dict[int, list[dict]] = {}
+    for e in edge_gt:
+        by_inst.setdefault(e["instance_id"], []).append(e)
+
+    insts = {
+        i["instance_id"]: i
+        for i in manifest["instance_ground_truth"]
+        if i["pattern_type"] == "lending_laundry"
+    }
+    assert len(insts) >= 1
+    margin_lo, margin_hi = cfg.edge_attributes.amount["lending_laundry"]["margin_fraction"]
+    for inst_id, inst in insts.items():
+        entries = by_inst[inst_id]
+        roles = {e["role"]: e["amount"] for e in entries}
+        deposit = roles["loan_deposit"]
+        draw = roles["loan_draw"]
+        repay = roles["loan_repay"]
+        release = roles["loan_release"]
+        assert draw == repay, "borrower repays exactly the drawn amount"
+        assert 0 < draw < deposit, "loan is collateralized at a margin"
+        margin = (deposit - draw) / deposit
+        assert margin_lo - 1e-6 <= margin <= margin_hi + 1e-6, margin
+        assert deposit + repay == draw + release, "pool inflows must equal outflows exactly"
+
+
+def test_structural_features_match_semantic_columns(tmp_path: Path, stats_dir: Path) -> None:
+    from kyt_engine.synth.features_structural import structural_features
+
+    cfg = _small_config(stats_dir)
+    cfg.features.mode = "semantic"
+    cfg.out_dir = tmp_path / "run"
+    _run_semantic(cfg)
+    fet = pd.read_csv(cfg.out_dir / "elliptic_txs_features.csv", header=None)
+    fet.columns = ["txId", "time_step"] + [f"feat_{i}" for i in range(2, fet.shape[1])]
+    edg = pd.read_csv(cfg.out_dir / "elliptic_txs_edgelist.csv")
+    ts = fet.set_index("txId")["time_step"].astype("int64")
+    st = structural_features(edg, ts)
+    assert list(st.columns) == [
+        "in_degree", "out_degree", "in_unique_neighbors", "out_unique_neighbors",
+        "has_incoming", "has_outgoing", "step_norm",
+    ]
+    idx = fet.set_index("txId")
+    assert (st["in_degree"] == idx["feat_2"]).all()
+    assert (st["out_degree"] == idx["feat_3"]).all()
+    assert (st["has_incoming"] == idx["feat_23"]).all()
+    assert (st["has_outgoing"] == idx["feat_24"]).all()
+    assert np.allclose(st["step_norm"], idx["feat_25"])
+
+
+def test_distribution_report_self_consistency() -> None:
+    from kyt_engine.synth.distribution import distribution_report
+
+    rng = np.random.default_rng(3)
+    S = rng.normal(size=(2400, 7))
+    S[:, 0] = S[:, 1] ** 2 + 0.1 * S[:, 2]
+    names = [f"f{i}" for i in range(7)]
+    # same distribution vs itself -> low gap, ratios ~ 1
+    rep = distribution_report(S, S, names, rng=rng, n_pairs=21)
+    ratios = rep["deviation_ratio (real / own-split, <2 healthy)"]
+    assert ratios["marginal_mmd2"] is None or ratios["marginal_mmd2"] < 2.0
+    assert ratios["copula_bivariate_mmd2"] < 2.0
+    # a sharply different cloud (heavy tails render the marginals very dissimilar)
+    S_bad = np.sign(S) * np.abs(S) ** 2
+    rep_bad = distribution_report(S, S_bad, names, rng=rng, n_pairs=21)
+    assert (
+        rep_bad["synthetic_vs_real"]["marginal_mmd2"]["mean"]
+        > rep["synthetic_vs_real"]["marginal_mmd2"]["mean"]
+    )
+
+
+def _fake_raw(tmp_path: Path) -> Path:
+    raw = tmp_path / "raw"
+    raw.mkdir()
+    rng = np.random.default_rng(9)
+    n = 800
+    txid = np.arange(n)
+    ts = np.sort(np.random.default_rng(4).integers(1, 50, size=n))
+    feats = rng.normal(size=(n, 3))
+    feat_df = pd.DataFrame(np.column_stack([txid, ts, feats[:, 0]]))
+    feat_df.to_csv(raw / "elliptic_txs_features.csv", header=False, index=False)
+    classes = np.random.default_rng(5).choice(
+        ["1", "2", "unknown"], size=n, p=[0.1, 0.4, 0.5]
+    )
+    pd.DataFrame({"txId": txid, "class": classes}).to_csv(
+        raw / "elliptic_txs_classes.csv", index=False
+    )
+    g = np.random.default_rng(6)
+    u = g.integers(0, n, size=600)
+    v = g.integers(0, n, size=600)
+    edg = pd.DataFrame({"txId1": u, "txId2": v})
+    edg = edg[edg["txId1"] != edg["txId2"]]
+    edg.to_csv(raw / "elliptic_txs_edgelist.csv", index=False)
+    return raw
+
+
+def test_downstream_report_machinery(tmp_path: Path, stats_dir: Path) -> None:
+    from kyt_engine.synth.downstream import run_downstream, write_downstream_report
+
+    raw = _fake_raw(tmp_path)
+    cfg = _small_config(stats_dir)
+    cfg.out_dir = tmp_path / "run"
+    _run(cfg)
+    rep = run_downstream(cfg.out_dir, raw, seed=0)
+    for key in ("feature_space", "synthetic_trained", "real_trained", "transfer_f1_gap"):
+        assert key in rep, key
+    assert set(rep["real_trained"]) == {"on_real_test"}
+    write_downstream_report(cfg.out_dir, rep)
+    assert (cfg.out_dir / "downstream_report.json").exists()
+
+
+def test_validate_missing_raw_messages(tmp_path: Path, stats_dir: Path) -> None:
+    from kyt_engine.synth.distribution import _check_raw
+
+    cfg = _small_config(stats_dir)
+    _run(cfg)
+    empty = tmp_path / "noraw"
+    empty.mkdir()
+    with pytest.raises(FileNotFoundError, match="raw Elliptic data missing"):
+        _check_raw(empty)
