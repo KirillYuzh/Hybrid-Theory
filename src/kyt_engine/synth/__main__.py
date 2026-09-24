@@ -9,6 +9,7 @@ import numpy as np
 
 from .config import GeneratorConfig
 from .emit import write_dataset
+from .experiments import run_protocol, write_report
 from .features import build_features_matrix
 from .graph import build_graph
 from .stats import CLASS_NAMES, EllipticStats
@@ -44,7 +45,14 @@ def _generate(config_path: Path) -> None:
 
 
 def _validate(
-    dir_path: Path, raw_dir: Path, run_distribution: bool, run_downstream_val: bool
+    dir_path: Path,
+    raw_dir: Path,
+    run_distribution: bool,
+    run_downstream_val: bool,
+    seeds: list[int] | None = None,
+    space: str = "structural",
+    config: Path | None = None,
+    n_estimators: int = 200,
 ) -> None:
     from .validate import validate_dataset, validate_edge_attributes, validate_semantic_features
 
@@ -67,10 +75,22 @@ def _validate(
         out.write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")
         print(f"OK: distribution fidelity report -> {out}")
     if run_downstream_val:
-        report = run_downstream_validation(dir_path, raw_dir)
-        out = dir_path / "downstream_report.json"
-        out.write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")
-        print(f"OK: downstream transfer report -> {out}")
+        report = run_protocol(
+            config or Path("configs/generator.yaml"),
+            raw_dir,
+            seeds=seeds or list(range(downstream_seeds)),
+            space=space,
+            n_estimators=n_estimators,
+        )
+        out = write_report(dir_path / f"downstream_report_{space}.json", report)
+        print(f"OK: downstream protocol ({report['n_seeds']} seeds, {report['scenario']}) -> {out}")
+        print(f"   models: {', '.join(report['models'])}")
+        for name, test in report["shift_tests"].items():
+            flag = "significant" if test["welch_post_vs_pre"]["significant"] else "not significant"
+            print(
+                f"   {name}: F1 {test['pre_shift_f1']} -> {test['post_novel_f1']} "
+                f"(post vs pre: {flag}, p={test['welch_post_vs_pre']['p']})"
+            )
 
     if not (run_distribution or run_downstream_val):
         tip = "add --mmd and/or --downstream to validate against real Elliptic (needs data/raw)"
@@ -113,6 +133,33 @@ def run_downstream_validation(dir_path: Path, raw_dir: Path) -> dict:
 
 distribution_seed = 1
 downstream_seed = 2
+downstream_seeds = 20
+
+
+def _sweep(args: argparse.Namespace) -> None:
+    from .experiments import run_fragmentation_sweep, write_report
+
+    grid = [float(x) for x in args.grid.split(",")]
+    seeds = [int(x) for x in args.seeds.split(",")]
+    axis = "supervision" if args.dimension == "supervision" else "labeled_ratio"
+    report = run_fragmentation_sweep(
+        Path(args.config),
+        Path(args.raw_dir),
+        seeds=seeds,
+        labeled_ratios=grid if axis == "labeled_ratio" else [0.23],
+        supervision_fractions=grid if axis == "supervision" else None,
+        space=args.space,
+        dimension=axis,
+    )
+    out = write_report(Path(args.out), report)
+    print(f"OK: {axis} sweep ({len(grid)} points x {len(seeds)} seeds) -> {out}")
+    for point in report["curve"]:
+        sup = point["per_seed"][0]
+        print(
+            f"   {axis}={point[axis]}: F1={point['f1_mean']} +/- {point['f1_std']} "
+            f"(supervised illicit={sup['n_supervised_illicit']}, "
+            f"drop vs best {report['degradation_vs_best'][str(point[axis])]})"
+        )
 
 
 def main() -> None:
@@ -126,12 +173,37 @@ def main() -> None:
     v.add_argument("--mmd", action="store_true",
                    help="MMD/copula distribution fidelity vs real Elliptic (needs data/raw)")
     v.add_argument("--downstream", action="store_true",
-                   help="RF transfer to held-out real Elliptic with F1/PR-AUC/ECE report")
+                   help="replicated transfer protocol (N seeds, Welch t-test, shift periods)")
+    v.add_argument("--seeds", default="", help="comma-separated generator seeds for --downstream")
+    v.add_argument("--space", default="structural", choices=["structural", "cdf_full"],
+                   help="shared feature space for the downstream comparison")
+    v.add_argument("--config", default="configs/generator.yaml",
+                   help="config template the downstream protocol re-generates from")
+    v.add_argument("--estimators", type=int, default=200,
+                   help="trees per boosting model (lower = cheaper, noisier)")
+    s = sub.add_parser("sweep", help="Fragmented-supervision sweep")
+    s.add_argument("--config", default="configs/generator.yaml")
+    s.add_argument("--raw-dir", default="data/raw")
+    s.add_argument("--grid", default="0.05,0.10,0.23,0.30",
+                   help="comma-separated sweep points")
+    s.add_argument("--dimension", default="labeled_ratio",
+                   choices=["labeled_ratio", "supervision"],
+                   help="labeled_ratio = generator budget; supervision = subsample labels")
+    s.add_argument("--seeds", default="0,1,2")
+    s.add_argument("--space", default="structural", choices=["structural", "cdf_full"])
+    s.add_argument("--out", default="data/synthetic/run/fragmentation_report.json")
     args = parser.parse_args()
     if args.cmd == "generate":
         _generate(Path(args.config))
     elif args.cmd == "validate":
-        _validate(Path(args.dir), Path(args.raw_dir), args.mmd, args.downstream)
+        seeds = [int(s) for s in args.seeds.split(",")] if args.seeds else None
+        _validate(
+            Path(args.dir), Path(args.raw_dir), args.mmd, args.downstream,
+            seeds=seeds, space=args.space, config=Path(args.config),
+            n_estimators=args.estimators,
+        )
+    elif args.cmd == "sweep":
+        _sweep(args)
 
 
 if __name__ == "__main__":

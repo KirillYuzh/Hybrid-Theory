@@ -67,6 +67,33 @@
 
 Проверенный сценарий: `shutdown_step: 40`, `shutdown_rate_multiplier: 0.0`, `novel_step: 45` — novel-схемы строго на 45–49, старый illicit только до шага 40.
 
+## Валидация качества и downstream
+
+Помимо формального контракта, `validate` умеет сверять синтетику с настоящим Elliptic — но для этого нужны его raw-файлы в `data/raw/` (gitignored):
+
+```bash
+python -m kyt_engine.synth validate --dir data/synthetic/run --mmd --downstream
+```
+
+Сверка ведётся в **общем структурном подпространстве** (`features_structural.py`: in/out степени, уникальные соседи, наличие входящих/исходящих рёбер, нормализованный шаг) — оно считается по edgelist + time_step и для синтетики, и для реальных данных (суммы не нужны):
+
+- **`--mmd`** → `distribution_report.json`. Для каждой колонки — univariate MMD² (biased), статистика **bivariate MMD² в copula-пространстве** (ранги, фиксирует расхождение зависимостей, а не маргиналов) и **correlation gap** (средний |Δ|-Spearman). Всегда рядом отчёт `synthetic_vs_own_split` (разбиение синтетики пополам) как «шумовая база»; правило здоровья: `ratio = synthetic_vs_real / own_split < 2`. При `features.mode: cdf` дополнительно тот же отчёт по полному 165-мерному пространству фич.
+- **`--downstream`** → `downstream_report_<space>.json`. Протокол оценки в духе ADCC-Bench: **только temporal split** (random split завышает Macro-F1 до ~11% и переворачивает ранжирование моделей), **N сидов генератора** (по умолчанию 20), **Welch's t-test** с эффектом Cohen's d как единственный вентиль значимости, отдельные метрики для периодов **pre-shift (31–40)** и **post-novel (45–49)**, атрибуция признаков (SHAP + permutation importance). Модели в одном сравнении: RF, LightGBM, graph-conv и их soft-vote ансамбль; все получают одну и ту же матрицу после общего preprocessing-контракта (скалер обучается только на train-периоде). Флаг `--space` выбирает общее пространство признаков: `structural` (7 колонок, дёшево, 20 сидов) или `cdf_full` (165 реальных фич Elliptic — «родной» режим ADCC-Bench, заметно дороже).
+- **`sweep`** → `fragmentation_report*.json`: фрагментация supervision. `--dimension labeled_ratio` меняет бюджет генератора, `--dimension supervision` варьирует долю доступных размеченных строк (честный способ урезать обучение: посаженные схемы дают illicit-разметку независимо от бюджета).
+
+**Что показывают прогоны на настоящем Elliptic** (`--space cdf_full`, 5 сидов, streaming_drift):
+
+| Модель (синтетика → реальность) | pre-shift F1 | post-novel F1 | t-тест post vs pre |
+|---|---|---|---|
+| RF | 0.2564 ± 0.016 | 0.0654 ± 0.009 | **p = 2.1e-07** (значимо) |
+| LightGBM | 0.1074 ± 0.080 | 0.0303 ± 0.025 | p = 0.098 (не значимо) |
+| graph-conv (SGC-прокси) | 0.0592 ± 0.003 | 0.0128 ± 0.001 | **p = 2.0e-06** (значимо) |
+| soft-vote ансамбль | 0.1491 ± 0.066 | 0.0382 ± 0.015 | **p = 1.8e-02** (значимо) |
+
+Выводы, которые теперь измерены, а не предположены: (1) переход на временной сдвиг обрушивает перенос для всех моделей; (2) ансамбль **значимо хуже RF** на общем тесте (d = −2.26, p = 0.015) и не даёт выигрыша против LightGBM (p = 0.84) — ровно тот вывод, что выигрыш ансамблей часто незначим и сводится к снижению дисперсии; (3) graph-conv заметно слабее tree-моделей на трансфере, но его падение под сдвигом тоже статистически значимо; (4) в `cdf`-режиме фрагментация разметки **не** даёт деградации (F1 ≈ 0.028 при доле supervision от 1% до 100%) — маргиналы реплицируются настолько точно, что handful размеченных illicit-узлов уже достаточен; урон наносит именно временной сдвиг, а не нехватка меток.
+
+**Почему такой гранулярности достаточно (rationale).** Цель — не POST-воспроизведение 165 маргиналов, а валидация «схем + retrieval + трансфер на тот же downstream-бенчмарк, что у реальных данных». Для этого хватает (а) общего структурного пространства, в котором генератор обязан совпасть с Elliptic по маргиналам и зависимостям, и (b) downstream-сплита train ≤30 / valid 31–40 / test ≥41 — честный аналог hold-out «невидимой» выборки Elliptic. Полное 165-мерное пространство сравнивается только в `cdf`-режиме (и на нём тяжело претендовать на «похожесть» — см. «Ограничения»).
+
 ## Ограничения
 
 Проект — инструмент для **контролируемых** экспериментов retrieval + GBDT (в духе Spillety), а не замена реальных размеченных данных. Что он не делает:
@@ -75,7 +102,7 @@
 - **Худшие честные числа**: на суррогатной валидации (полный 165-мерный отчёт в `cdf`-режиме и структурное подпространство) синтетика пока заметно дальше от реальных данных, чем own-split-шум — correlation gap в 10× больше базы в `cdf`-пространстве, а transfer-F1 на реальном тесте невысок. Это ожидаемо: маргиналы-копии Elliptic не дают ни корреляций, ни перфорации «из коробки»; отчёт честно это показывает;
 - **`p2p` фон — структурный шум**, а не семантический licit: «licit» не означает «реальная биржа», поэтому модель может выучить «licit = случайные рёбра»; явные licit-схемы (`exchange_hub`, `miner_payout`, `wallet_provider`) нужно включать вручную;
 - **Decoys** — детектированные случайные мотивы фона, а не контролируемые негативные примеры (стикинг-пул, DEX-арбитраж). Такие licit-negative пока не генерируются;
-- **Downstream-валидация — суррогат**, не proof: RF на структурном подпространстве решает упрощённую задачу, а честные пороги (`≤ 0.05` gap) ещё не калибровались на бОльшей сетке конфигов;
+- **Downstream-протокол калиброван статистически, но не «доказан»**: Welch-тест с N сидами отделяет эффект от шума, однако `graph_conv` — это SGC-прокси на numpy, а не полноценный GNN (в окружении нет torch), так что вывод «graph-модели уязвимы к сдвигу» здесь иллюстративный;
 - **Покрытые схемы** — классические (mixer, peel, fanout, wash, structuring, round-trip, bridge-hopping, AMM-цепочки) + stealth-платежи и lending-as-laundering; agentic-микроразбиение, pre-funding и контролируемые licit-negative ещё не реализованы;
 - **`semantic`-режим** осмысленен, но его производные колонки (24..164) не соответствуют распределению Elliptic — их нельзя использовать для оценки «похожести» на реальные данные.
 
@@ -125,8 +152,15 @@ python -m kyt_engine.synth validate --dir data/synthetic/run
 
 # 4. Валидация качества против настоящего Elliptic (нужны data/raw/elliptic_txs_*.csv):
 #    --mmd        -> distribution_report.json  (MMD², copula, correlation gap)
-#    --downstream -> downstream_report.json    (RF-трансфер на held-out Elliptic)
+#    --downstream -> downstream_report_<space>.json (N сидов, Welch t-test, shift-периоды)
 python -m kyt_engine.synth validate --dir data/synthetic/run --raw-dir data/raw --mmd --downstream
+
+#    «родной» режим ADCC-Bench: 165 реальных фич Elliptic (дороже, но информативнее)
+python -m kyt_engine.synth validate --dir data/synthetic/run --space cdf_full --downstream --seeds 0,1,2,3,4
+
+# 5. Фрагментация supervision: сколько размеченных данных нужно на самом деле
+python -m kyt_engine.synth sweep --raw-dir data/raw --space cdf_full --dimension supervision \
+    --grid 0.01,0.05,0.2,0.5,1.0 --out data/synthetic/run/fragmentation_supervision.json
 ```
 
 Детерминизм: одинаковый `seed` + одинаковый конфиг -> байт-в-байт одинаковые файлы (включая manifest).
@@ -154,10 +188,11 @@ Hybrid-Theory/
 │       ├── features_semantic.py    # фиче-матрица (semantic-режим): из топологии/атрибутов
 │       ├── features_structural.py  # общее 7-колоночное структурное подпространство (синт. + raw)
 │       ├── distribution.py         # MMD²/copula/correlation-gap против raw Elliptic
-│       ├── downstream.py           # RF-трансфер: F1/PR-AUC/ECE на held-out реальном тесте
+│       ├── downstream.py           # односидовая RF-проверка (совместимость)
+│       ├── experiments.py          # протокол оценки: N сидов, Welch, shift-периоды, атрибуция
 │       ├── emit.py                 # 4 CSV + manifest.json (sha256, ground truth, retrieval)
 │       ├── validate.py             # контракт-валидатор + семантическая сверка
-│       └── __main__.py             # CLI: generate | validate (--mmd/--downstream/--raw-dir)
+│       └── __main__.py             # CLI: generate | validate (--mmd/--downstream/--space) | sweep
 └── tests/test_synth.py
 ```
 
