@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import math
 
 import numpy as np
@@ -7,38 +5,46 @@ import numpy as np
 from .graph import GeneratedGraph
 from .stats import N_FEATURES, N_STEPS
 
-# Fixed, documented layout of the interpretable feature columns (0-based index within
-# the 165 feature columns, i.e. CSV column feat_{index + 2}). Value features are stored
-# as log1p(dollars) to keep magnitudes ML-friendly; counts and time deltas stay raw.
+# Column indices are zero-based within the 165 feature columns; CSV names are feat_{index + 2}.
+# Amount aggregates, extrema, and standard deviations use log1p; the in/out ratio
+# is a difference of log1p totals, while net flow and per-degree values remain dollars.
+# Time deltas are steps; edge-hour columns use hours and time_step_norm is time_step / 49.
 SEMANTIC_COLUMNS: dict[int, str] = {
     0: "in_degree",
     1: "out_degree",
-    2: "value_out",        # log1p(sum of outgoing amounts)
-    3: "value_in",         # log1p(sum of incoming amounts)
-    4: "net_flow",         # raw dollars: value_in - value_out
-    5: "log_ratio_in_out", # log1p(value_in) - log1p(value_out)
-    6: "max_in_amount",    # log1p
-    7: "mean_in_amount",   # log1p
-    8: "max_out_amount",   # log1p
-    9: "mean_out_amount",  # log1p
-    10: "min_in_amount",   # log1p
-    11: "in_age_min",      # min step delta across in-neighbors
+    2: "value_out",
+    3: "value_in",
+    4: "net_flow",
+    5: "log_ratio_in_out",
+    6: "max_in_amount",
+    7: "mean_in_amount",
+    8: "max_out_amount",
+    9: "mean_out_amount",
+    10: "min_in_amount",
+    11: "in_age_min",
     12: "in_age_mean",
     13: "in_age_max",
-    14: "out_age_mean",    # mean step delta across out-neighbors
-    15: "value_per_in",    # raw dollars value_in / in_degree
-    16: "value_per_out",   # raw dollars value_out / out_degree
-    17: "in_amount_std",   # log1p(std of incoming amounts)
-    18: "out_amount_std",  # log1p(std of outgoing amounts)
-    19: "edge_hours_mean_in",   # mean edge timestamp (hours)
+    14: "out_age_mean",
+    15: "value_per_in",
+    16: "value_per_out",
+    17: "in_amount_std",
+    18: "out_amount_std",
+    19: "edge_hours_mean_in",
     20: "edge_hours_mean_out",
-    21: "has_incoming",    # 0/1
-    22: "has_outgoing",    # 0/1
-    23: "time_step_norm",  # time_step / 49
+    21: "has_incoming",
+    22: "has_outgoing",
+    23: "time_step_norm",
+}
+
+CHAIN_SEMANTIC_COLUMNS: dict[int, str] = {
+    24: "chain_bitcoin",
+    25: "chain_ethereum",
+    26: "chain_tron",
+    27: "cross_chain_in",
+    28: "cross_chain_out",
 }
 
 _N_SEMANTIC = len(SEMANTIC_COLUMNS)
-_N_DERIVED = N_FEATURES - _N_SEMANTIC
 
 
 def _log1p(value: float) -> float:
@@ -46,8 +52,13 @@ def _log1p(value: float) -> float:
 
 
 def _derived(S: np.ndarray, col: int) -> np.ndarray:
-    """Deterministic fill for the non-semantic columns (24..164): pairwise log transforms
-    of the semantic vector. No RNG, no Elliptic marginals — byte-reproducible by construction."""
+    """Create a deterministic nonlinear transform for one semantic feature column.
+
+    Returns
+    -------
+    numpy.ndarray
+        One transformed value per row of the base semantic feature matrix.
+    """
     k = col - _N_SEMANTIC
     a = k % _N_SEMANTIC
     b = (k // _N_SEMANTIC) % _N_SEMANTIC
@@ -57,13 +68,21 @@ def _derived(S: np.ndarray, col: int) -> np.ndarray:
     return la * lb * (1.0 + 0.01 * np.abs(S[:, c]))
 
 
-def build_semantic_features(
-    graph: GeneratedGraph, edge_attrs: list[dict | None]
-) -> np.ndarray:
-    """Interpretable (n, 165) feature matrix computed from topology and edge attributes.
+def build_semantic_features(graph: GeneratedGraph, edge_attrs: list[dict | None]) -> np.ndarray:
+    """Build the 165-column semantic feature matrix from graph structure.
 
-    Structural and amount RNG streams are untouched — everything here is a pure function
-    of the graph + already-materialized edge attributes.
+    Parameters
+    ----------
+    graph : GeneratedGraph
+        Graph providing node time steps, directed edges, and optional chain metadata.
+    edge_attrs : list[dict | None]
+        Edge attributes aligned with ``graph.edges``. A missing value is ignored,
+        while a present record must provide ``amount`` and ``timestamp`` values.
+
+    Returns
+    -------
+    numpy.ndarray
+        Float64 matrix with shape ``(len(graph.nodes), 165)`` in canonical column order.
     """
     n = len(graph.nodes)
     pos = {nd.tx_id: i for i, nd in enumerate(graph.nodes)}
@@ -128,6 +147,22 @@ def build_semantic_features(
         out[:, j] = S[:, j]
     for j in range(_N_SEMANTIC, N_FEATURES):
         out[:, j] = _derived(S, j)
+    if hasattr(graph, "node_meta"):
+        chain_by_tx = {meta.tx_id: meta.chain_id for meta in graph.node_meta}
+        chain_features = np.zeros((n, len(CHAIN_SEMANTIC_COLUMNS)), dtype=np.float64)
+        chain_index = {
+            "bip122:000000000019d6689c085ae165831e93": 0,
+            "eip155:1": 1,
+            "eip155:728126428": 2,
+        }
+        for tx_id, chain_id in chain_by_tx.items():
+            if chain_id in chain_index:
+                chain_features[pos[tx_id], chain_index[chain_id]] = 1.0
+        for u, v in graph.edges:
+            if chain_by_tx[u] != chain_by_tx[v]:
+                chain_features[pos[v], 3] += 1.0
+                chain_features[pos[u], 4] += 1.0
+        out[:, 24:29] = chain_features
     return out
 
 

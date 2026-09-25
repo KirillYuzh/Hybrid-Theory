@@ -1,12 +1,3 @@
-"""Structural feature subspace computable from an edgelist + time_step alone.
-
-Used for cross-dataset validation (downstream transfer, MMD/copula):
-no amounts are needed, so the same features are computed for the synthetic dataset
-and for real Elliptic from its raw edgelist. Pure pandas/numpy, deterministic, no RNG.
-"""
-
-from __future__ import annotations
-
 import pandas as pd
 
 from .stats import N_STEPS
@@ -23,11 +14,20 @@ STRUCTURAL_FEATURES = [
 
 
 def structural_features(edgelist: pd.DataFrame, time_step: pd.Series) -> pd.DataFrame:
-    """Per-node structural features over a tx universe defined by `time_step`.
+    """Compute structural features for the transaction IDs in ``time_step``.
 
-    `edgelist` must have columns [txId1, txId2]; `time_step` indexed by txId (all nodes,
-    including isolated ones). Column order follows STRUCTURAL_FEATURES; parallel edges are
-    allowed and inflate degree but not the unique-neighbor counts.
+    Parameters
+    ----------
+    edgelist : pandas.DataFrame
+        Directed edges with ``txId1`` and ``txId2`` columns. Parallel edges affect
+        degree but not unique-neighbor counts.
+    time_step : pandas.Series
+        Time step for each transaction, indexed by the node ID to be retained.
+
+    Returns
+    -------
+    pandas.DataFrame
+        Features indexed like ``time_step`` with columns in ``STRUCTURAL_FEATURES`` order.
     """
     all_ids = time_step.index
     in_deg = edgelist.groupby("txId2").size().reindex(all_ids, fill_value=0).astype("int64")

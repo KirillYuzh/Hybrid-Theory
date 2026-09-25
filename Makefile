@@ -1,4 +1,4 @@
-.PHONY: install test lint clean stats generate validate
+.PHONY: install test lint clean generate validate validate-real
 
 VENV := .venv
 PYTHON := $(VENV)/bin/python
@@ -19,11 +19,11 @@ clean:
 	find . -type f -name "*.pyc" -delete
 	rm -rf .ruff_cache .pytest_cache
 
-stats:
-	$(PYTHON) -m kyt_engine._stats.compute
-
 generate:
-	$(PYTHON) -m kyt_engine.synth generate --config configs/generator.yaml
+	$(PYTHON) -m kyt_engine.synth generate --config configs/generator_behavior.yaml
 
 validate:
-	$(PYTHON) -m kyt_engine.synth validate --dir data/synthetic/run
+	$(PYTHON) -m kyt_engine.synth validate --dir data/synthetic/behavior_run
+
+validate-real:
+	$(PYTHON) -m kyt_engine.synth validate-real --config configs/generator_behavior.yaml --raw-dir data/raw --out data/synthetic/behavior_run/strict_report.json

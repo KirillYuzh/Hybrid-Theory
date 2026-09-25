@@ -1,41 +1,39 @@
 ---
 name: generator
-description: Навигация по проекту Hybrid-Theory (генератор синтетических данных Elliptic++) — приоритетный порядок чтения репозитория, актуальные пути, контракт и критерии приёмки
+description: Навигация по Hybrid-Theory: behavior-driven генератор, проверка данных и strict downstream
 ---
 
-Начинай изучение проекта с `https://github.com/KirillYuzh/Hybrid-Theory/blob/main/README.md`.
+Начинай с `README.md`, затем читай `docs/overview.md` и `docs/behavior-model.md`.
 
-## Актуальные, обязательные к чтению источники
+## Основные файлы
 
-- `https://github.com/KirillYuzh/Hybrid-Theory/blob/main/README.md` — что генерирует, CLI, структура
-- `https://github.com/KirillYuzh/Hybrid-Theory/blob/main/configs/generator.yaml` — размеры, схемы, дрифт (единственный источник параметров прогона)
-- `https://github.com/KirillYuzh/Hybrid-Theory/blob/main/src/kyt_engine/synth/__main__.py` — CLI: `generate | validate`
-- `https://github.com/KirillYuzh/Hybrid-Theory/blob/main/tests/test_synth.py` — как проверять генератор
+- `configs/generator_behavior.yaml`: каноническая конфигурация, seed `72`.
+- `src/kyt_engine/synth/behavior.py`: сущности, действия, события и причинные цепочки.
+- `src/kyt_engine/synth/drift.py`: фазы временного расписания и распределение слотов.
+- `src/kyt_engine/synth/features_semantic.py`: признаки из топологии, сумм и цепочек.
+- `src/kyt_engine/synth/emit.py`: четыре CSV и manifest.
+- `src/kyt_engine/synth/validate.py`: проверка формата, семантики и provenance.
+- `src/kyt_engine/synth/gnn_downstream.py`: строгая индуктивная проверка на временных разделах.
+- `tests/test_synth.py`: поведенческий контракт, детерминизм и отрицательные проверки.
 
-## Модули генератора (что читать, если правишь конкретную часть)
+## Команды
 
-- `https://github.com/KirillYuzh/Hybrid-Theory/blob/main/src/kyt_engine/synth/config.py` — `GeneratorConfig`/`DriftConfig`/`FeatureConfig`/`AnchorsConfig` (yaml)
-- `https://github.com/KirillYuzh/Hybrid-Theory/blob/main/src/kyt_engine/synth/stats.py` — CDF-артефакты, inverse-CDF-сэмплинг, объёмы по шагам (`need_cdf=False` для semantic-режима)
-- `https://github.com/KirillYuzh/Hybrid-Theory/blob/main/src/kyt_engine/synth/schemes.py` — шаблоны схем: mixer, peel_chain, fanout, hub_spoke, wash (дрифт-эксклюзив) + современные (structuring, cycle_round_trip, bridge_hopping, amm_swap_chain) + licit (exchange_hub, miner_payout, wallet_provider) — новые по умолчанию `n_instances: 0`
-- `https://github.com/KirillYuzh/Hybrid-Theory/blob/main/src/kyt_engine/synth/graph.py` — сборка графа, роли/рёбра/time_step, temporal drift (множественные novel-схемы), `SchemeRun` (границы инстансов, без RNG)
-- `https://github.com/KirillYuzh/Hybrid-Theory/blob/main/src/kyt_engine/synth/features.py` — матрица фич feat_2..feat_166 (cdf-режим) по классу
-- `https://github.com/KirillYuzh/Hybrid-Theory/blob/main/src/kyt_engine/synth/features_semantic.py` — матрица фич (semantic-режим): вычисляется из топологии/edge-атрибутов, раскладка колонок в `manifest.feature_semantics`, без CDF
-- `https://github.com/KirillYuzh/Hybrid-Theory/blob/main/src/kyt_engine/synth/anchors.py` — retrieval-слой: инстансы, edge-атрибуты (отдельный attr-RNG), якоря (центральные, `prefer_central_anchors`) + K-hop, decoy-разметка, holdout-аннотация
-- `https://github.com/KirillYuzh/Hybrid-Theory/blob/main/src/kyt_engine/synth/emit.py` — 4 CSV + manifest.json (sha256 + ground_truth + retrieval-бенчмарк)
-- `https://github.com/KirillYuzh/Hybrid-Theory/blob/main/src/kyt_engine/synth/validate.py` — дубль контракта загрузчика формата Elliptic++ + `validate_semantic_features`
-- `https://github.com/KirillYuzh/Hybrid-Theory/blob/main/src/kyt_engine/_stats/compute.py` — разовое снятие статистик с реального Elliptic
+- `python -m kyt_engine.synth generate --config configs/generator_behavior.yaml`
+- `python -m kyt_engine.synth validate --dir data/synthetic/behavior_run`
+- `python -m kyt_engine.synth validate-real --config configs/generator_behavior.yaml --raw-dir data/raw --out data/synthetic/behavior_run/strict_report.json --tier smoke`
 
-## Контракт и критерии приёмки (генерация синтетики)
+## Контракты
 
-- `python -m kyt_engine.synth generate` -> 4 CSV + manifest.json: 10 000 tx, 14 092 рёбра (AC-эталон не зависит от `n_instances: 0` и `features.mode`)
-- Формат: features без header / classes с header / edgelist с header; `temporal_split` train ≤30, valid 31..40, test 41..49 -> 5856 / 2050 / 2094
-- `python -m kyt_engine.synth validate` подтверждает контракт формата; классы — строки `{'unknown', '2', '1'}`; для semantic-режима дополнительно сверяет фичи с edgelist/атрибутами
-- Детерминизм: одинаковый seed -> байт-в-байт идентичные файлы (включая manifest, оба режима фич)
-- Дрифт: novel-схемы из `novel_schemes` появляются только на шагах 45–49; shutdown подавляет illicit до шага 40; `shutdown_rate_multiplier` в (0,1) — постепенное затухание
+- Behavior run содержит ровно `n_txs` связанных событий и детерминированные CSV.
+- `features.mode` всегда `semantic`.
+- `unknown` не участвует в loss, threshold и метриках.
+- Strict partitions: `1..30`, `31..40`, `41..49`; cross-partition edges удаляются.
+- Full backend не заменяется SGC молча. SGC и auto без optional PyG являются диагностическими.
+- Real acceptance требует pinned raw snapshot, canonical config и frozen seeds `0..9`.
 
-## Известные ограничения (не правь молча)
+## Ограничения
 
-- CDF-режим ресэмплит маргиналы Elliptic (анонимизация, окно 2016–2017), joint-распределения не контролируются; semantic-режим осмысленен, но НЕ повторяет распределение Elliptic
-- Downstream-валидация (RF на синтетике против held-out Elliptic) отсутствует; MMD/copula не реализованы
-- p2p фон — структурный шум, decoys — случайные мотивы, не контролируемые licit-negative
-- RNG: структурный поток `default_rng(seed)` (см. AC-числа) менять нельзя; новые RNG — только через производный `attr_seed`
+- Семантические признаки не воспроизводят joint distribution Elliptic.
+- P0 chain metadata не является полным bridge или asset ledger.
+- Event ledger не доказывает полное сохранение mixer или round-trip motif.
+- `F1 > 0.5` является целью эксперимента, а не гарантией.
