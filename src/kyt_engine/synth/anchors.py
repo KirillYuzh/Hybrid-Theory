@@ -1,31 +1,11 @@
-from __future__ import annotations
-
-import hashlib
 from dataclasses import dataclass, field
-
-import numpy as np
 
 from .config import GeneratorConfig
 from .graph import GeneratedGraph
-from .stats import STEP_MIN
-
-# New RNG draws (edge amounts) must never touch the structural stream default_rng(seed),
-# otherwise AC numbers (10000 tx / 14092 edges) drift. Derive a separate deterministic stream.
-ATTR_SALT = ":attrs"
-
-
-def attr_seed(seed: int) -> int:
-    return int.from_bytes(hashlib.sha256(f"{seed}{ATTR_SALT}".encode()).digest()[:8], "little")
-
-
-def attr_rng(seed: int) -> np.random.Generator:
-    return np.random.default_rng(attr_seed(seed))
 
 
 @dataclass
 class PatternInstance:
-    """Annotations of one planted subgraph (or decoy p2p block) over the built graph."""
-
     instance_id: int
     pattern_type: str
     node_ids: list[int]
@@ -34,7 +14,7 @@ class PatternInstance:
     anchor_role: str
     max_anchor_distance: int
     temporal_window: tuple[int, int]
-    edge_attr_recipe: dict[int, str]
+    edge_attr_recipe: dict[int, str] = field(default_factory=dict)
     anchored: bool = False
     entity_type: str | None = None
     articulation_points: list[int] = field(default_factory=list)
@@ -42,429 +22,186 @@ class PatternInstance:
     train_excluded: bool = False
 
 
-def _instance_adjacency(graph: GeneratedGraph, node_ids: list[int], edge_ids: list[int]):
-    """Undirected adjacency of the instance subgraph, keyed by global tx_id."""
+def _instance_adjacency(
+    graph: GeneratedGraph, node_ids: list[int], edge_ids: list[int]
+) -> dict[int, list[tuple[int, int]]]:
     members = set(node_ids)
-    adj: dict[int, list[tuple[int, int]]] = {n: [] for n in node_ids}
-    for e in edge_ids:
-        u, v = graph.edges[e]
-        if u in members and v in members:
-            adj[u].append((v, e))
-            adj[v].append((u, e))
-    for lst in adj.values():
-        lst.sort()
-    return adj
+    adjacency: dict[int, list[tuple[int, int]]] = {node_id: [] for node_id in node_ids}
+    for edge_id in edge_ids:
+        source, target = graph.edges[edge_id]
+        if source in members and target in members:
+            adjacency[source].append((target, edge_id))
+            adjacency[target].append((source, edge_id))
+    for values in adjacency.values():
+        values.sort()
+    return adjacency
 
 
-def _bfs_layers(adj: dict[int, list[tuple[int, int]]], src: int) -> dict[int, int]:
-    """Distances from src within the instance subgraph (values are (neighbor, edge_id))."""
-    dist = {src: 0}
-    queue = [src]
-    for u in queue:
-        for v, _ in adj[u]:
-            if v not in dist:
-                dist[v] = dist[u] + 1
-                queue.append(v)
-    return dist
+def _bfs_layers(adjacency: dict[int, list[tuple[int, int]]], source: int) -> dict[int, int]:
+    distances = {source: 0}
+    queue = [source]
+    for node_id in queue:
+        for neighbor, _ in adjacency[node_id]:
+            if neighbor not in distances:
+                distances[neighbor] = distances[node_id] + 1
+                queue.append(neighbor)
+    return distances
 
 
 def _eccentricity(
     graph: GeneratedGraph, node_ids: list[int], edge_ids: list[int], anchor: int
 ) -> int:
-    adj = _instance_adjacency(graph, node_ids, edge_ids)
-    return max(_bfs_layers(adj, anchor).values(), default=0)
+    adjacency = _instance_adjacency(graph, node_ids, edge_ids)
+    return max(_bfs_layers(adjacency, anchor).values(), default=0)
 
 
 def _articulation_points(
     graph: GeneratedGraph, node_ids: list[int], edge_ids: list[int]
 ) -> list[int]:
-    """Tarjan on the instance subgraph (deterministic, no RNG)."""
-    adj = _instance_adjacency(graph, node_ids, edge_ids)
-    disc: dict[int, int] = {}
+    adjacency = _instance_adjacency(graph, node_ids, edge_ids)
+    discovery: dict[int, int] = {}
     low: dict[int, int] = {}
-    visited = set()
-    arts: set[int] = set()
-    count = 0
+    visited: set[int] = set()
+    result: set[int] = set()
+    counter = 0
 
-    def dfs(u: int, parent: int) -> None:
-        nonlocal count
-        visited.add(u)
-        disc[u] = low[u] = count
-        count += 1
+    def visit(node_id: int, parent: int) -> None:
+        nonlocal counter
+        visited.add(node_id)
+        discovery[node_id] = low[node_id] = counter
+        counter += 1
         children = 0
-        for v, _ in adj[u]:
-            if v == parent:
+        for neighbor, _ in adjacency[node_id]:
+            if neighbor == parent:
                 continue
-            if v not in visited:
+            if neighbor not in visited:
                 children += 1
-                dfs(v, u)
-                low[u] = min(low[u], low[v])
+                visit(neighbor, node_id)
+                low[node_id] = min(low[node_id], low[neighbor])
                 if parent == -1 and children > 1:
-                    arts.add(u)
-                elif parent != -1 and low[v] >= disc[u]:
-                    arts.add(u)
+                    result.add(node_id)
+                elif parent != -1 and low[neighbor] >= discovery[node_id]:
+                    result.add(node_id)
             else:
-                low[u] = min(low[u], disc[v])
+                low[node_id] = min(low[node_id], discovery[neighbor])
 
-    for n in sorted(adj):
-        if n not in visited:
-            dfs(n, -1)
-    return sorted(arts)
-
-
-EDGE_RECIPES: dict[str, str] = {
-    "peel_chain": "peel",
-    "wash": "wash",
-    "structuring": "struct_deposit",
-    "cycle_round_trip": "round_trip",
-    "bridge_hopping": "bridge_swap",
-    "amm_swap_chain": "amm_swap",
-    "exchange_hub": "exchange",
-    "miner_payout": "payout",
-    "wallet_provider": "custody",
-    "stealth_use": "stealth_pay",
-    "lending_laundry": "loan",
-}
-
-# lending edges alternate deposit, draw, repay, release per pool in this fixed order.
-LENDING_ROLE_CYCLE = ("loan_deposit", "loan_draw", "loan_repay", "loan_release")
-
-
-def _edge_recipe(pattern_type: str, edge: tuple[int, int], anchor: int) -> str:
-    if pattern_type == "mixer":
-        if edge[1] == anchor:
-            return "mixer_in"
-        return "mixer_out"
-    return EDGE_RECIPES.get(pattern_type, "star")  # fanout / hub_spoke / others
+    for node_id in sorted(adjacency):
+        if node_id not in visited:
+            visit(node_id, -1)
+    return sorted(result)
 
 
 def _central_anchor(node_ids: list[int], graph: GeneratedGraph, edge_ids: list[int]) -> int:
-    """Node minimizing eccentricity in the instance subgraph (most representative query),
-    ties resolved to the smallest node id for determinism."""
-    adj = _instance_adjacency(graph, node_ids, edge_ids)
-    best, best_ecc = node_ids[0], len(node_ids)
-    for n in node_ids:
-        ecc = max(_bfs_layers(adj, n).values(), default=0)
-        if ecc < best_ecc or (ecc == best_ecc and n < best):
-            best, best_ecc = n, ecc
+    adjacency = _instance_adjacency(graph, node_ids, edge_ids)
+    best = node_ids[0]
+    best_distance = len(node_ids)
+    for node_id in node_ids:
+        distance = max(_bfs_layers(adjacency, node_id).values(), default=0)
+        if distance < best_distance or (distance == best_distance and node_id < best):
+            best = node_id
+            best_distance = distance
     return best
 
 
-def build_instances(graph: GeneratedGraph, config: GeneratorConfig) -> list[PatternInstance]:
-    """Zero RNG. Instance node/edge ids from contiguous scheme_run blocks."""
-    entity_types = config.anchors.entity_types
-    instances: list[PatternInstance] = []
-    for run in graph.runs:
-        node_ids = list(range(run.node_id_start, run.node_id_start + run.node_count))
-        edge_ids = list(range(run.edge_id_start, run.edge_id_start + run.edge_count))
-        anchor = (
-            _central_anchor(node_ids, graph, edge_ids)
-            if config.anchors.prefer_central_anchors
-            else node_ids[0]
-        )
-        steps = [graph.nodes[n].step for n in node_ids]
-        recipe = {}
-        for pos, e in enumerate(edge_ids):
-            if run.name == "lending_laundry":
-                recipe[e] = LENDING_ROLE_CYCLE[pos % len(LENDING_ROLE_CYCLE)]
-            else:
-                recipe[e] = _edge_recipe(run.name, graph.edges[e], anchor)
-        instances.append(
-            PatternInstance(
-                instance_id=len(instances),
-                pattern_type=run.name,
-                node_ids=node_ids,
-                edge_ids=edge_ids,
-                anchor_node_id=anchor,
-                anchor_role=graph.nodes[anchor].role,
-                max_anchor_distance=_eccentricity(graph, node_ids, edge_ids, anchor),
-                temporal_window=(min(steps), max(steps)),
-                edge_attr_recipe=recipe,
-                entity_type=entity_types.get(run.name),
-                articulation_points=_articulation_points(graph, node_ids, edge_ids),
-            )
-        )
-    return instances
+def _full_adjacency(graph: GeneratedGraph) -> dict[int, list[int]]:
+    adjacency: dict[int, list[int]] = {node.tx_id: [] for node in graph.nodes}
+    for source, target in graph.edges:
+        adjacency[source].append(target)
+        adjacency[target].append(source)
+    for values in adjacency.values():
+        values.sort()
+    return adjacency
 
 
-def instance_id_of(
-    graph: GeneratedGraph, instances: list[PatternInstance]
-) -> dict[int, int | None]:
-    """tx_id -> instance_id (None for background). Nodes are registered in tx_id order."""
-    mapping: dict[int, int | None] = {}
-    for inst in instances:
-        for n in inst.node_ids:
-            mapping[n] = inst.instance_id
-    for nd in graph.nodes:
-        mapping.setdefault(nd.tx_id, None)
-    return mapping
-
-
-def _cents(value: float) -> int:
-    return int(round(value * 100))
-
-
-def _to_amount(cents: int) -> float:
-    return round(cents / 100.0, 2)
-
-
-def _uniform_cents(rng: np.random.Generator, lo: float, hi: float) -> int:
-    return rng.integers(_cents(lo), _cents(hi) + 1)
-
-
-def build_edge_attributes(
-    graph: GeneratedGraph,
-    instances: list[PatternInstance],
-    config: GeneratorConfig,
-    rng: np.random.Generator,
-) -> list[dict | None]:
-    """One entry per edge (index == edgelist row). Amounts in cents for exact invariants."""
-    amount_conf = config.edge_attributes.amount
-    scale = config.edge_attributes.timestamp_scale
-    attrs: list[dict | None] = [None] * len(graph.edges)
-    node_step = {nd.tx_id: nd.step for nd in graph.nodes}
-
-    def timestamp(u: int, v: int) -> int:
-        return scale * (max(node_step[u], node_step[v]) - STEP_MIN)
-
-    def entry(u: int, v: int, cents: int) -> dict:
-        return {"txId1": u, "txId2": v, "amount": _to_amount(cents), "timestamp": timestamp(u, v)}
-
-    for inst in instances:
-        pattern = inst.pattern_type
-        conf = amount_conf.get(pattern, amount_conf["p2p"])
-        if pattern == "mixer":
-            in_e = [e for e in inst.edge_ids if inst.edge_attr_recipe[e] == "mixer_in"]
-            out_e = [e for e in inst.edge_ids if inst.edge_attr_recipe[e] == "mixer_out"]
-            a_lo, a_hi = conf["amount_per_in"]
-            in_cents = [_uniform_cents(rng, a_lo, a_hi) for _ in in_e]
-            total_in = sum(in_cents)
-            fee_lo, fee_hi = conf["fee_fraction"]
-            fee = int(round(total_in * rng.uniform(fee_lo, fee_hi)))
-            out_budget = total_in - fee
-            if out_e:
-                weights = rng.uniform(0.5, 1.5, size=len(out_e))
-                wsum = weights.sum()
-                out_cents: list[int] = []
-                acc = 0
-                for w in weights[:-1]:
-                    part = int(out_budget * w / wsum)
-                    out_cents.append(part)
-                    acc += part
-                out_cents.append(out_budget - acc)  # last edge absorbs punctuation
-            else:
-                out_cents = []
-            for e, c in zip(in_e, in_cents):
-                u, v = graph.edges[e]
-                attrs[e] = entry(u, v, c)
-            for e, c in zip(out_e, out_cents):
-                u, v = graph.edges[e]
-                attrs[e] = entry(u, v, c)
-        elif pattern == "peel_chain":
-            amount = _uniform_cents(rng, *conf["start_amount"])
-            drip_lo, drip_hi = conf["drip"]
-            for e in inst.edge_ids:
-                u, v = graph.edges[e]
-                attrs[e] = entry(u, v, amount)
-                if e != inst.edge_ids[-1]:
-                    drip = rng.uniform(drip_lo, drip_hi)
-                    amount = max(1, int(amount * drip))  # floor at 1 cent; monotone non-increasing
-        elif pattern == "wash":
-            tol = conf["balance_tolerance"]
-            lo, hi = 1.0 / (1.0 + tol), 1.0 + tol
-            base = _uniform_cents(rng, *conf["amount"])
-            amount = base
-            cumulative = 1.0
-            for e in inst.edge_ids[:-1]:
-                u, v = graph.edges[e]
-                attrs[e] = entry(u, v, amount)
-                r = rng.uniform(lo, hi)
-                new_cum = min(max(cumulative * r, lo), hi)  # bound cumulative drift
-                r = new_cum / cumulative
-                cumulative = new_cum
-                amount = max(1, int(round(amount * r)))
-            e = inst.edge_ids[-1]  # closing edge returns to the start -> every node balances
-            u, v = graph.edges[e]
-            attrs[e] = entry(u, v, base)
-        elif pattern == "lending_laundry":
-            margin_lo, margin_hi = conf.get("margin_fraction", [0.1, 0.3])
-            for e in inst.edge_ids:
-                role = inst.edge_attr_recipe[e]
-                u, v = graph.edges[e]
-                if role == "loan_deposit":
-                    deposit = _uniform_cents(rng, *conf["amount"])
-                    margin = rng.uniform(margin_lo, margin_hi)
-                    attrs[e] = entry(u, v, deposit)
-                elif role == "loan_draw":
-                    draw = max(1, int(round(deposit * (1.0 - margin))))
-                    attrs[e] = entry(u, v, draw)
-                elif role == "loan_repay":
-                    attrs[e] = entry(u, v, draw)  # borrower repays the drawn amount
-                else:  # loan_release: pool returns the full collateral
-                    attrs[e] = entry(u, v, deposit)
-        else:  # fanout / hub_spoke / stealth_use star
-            for e in inst.edge_ids:
-                u, v = graph.edges[e]
-                attrs[e] = entry(u, v, _uniform_cents(rng, *conf["amount"]))
-
-    for e, (u, v) in enumerate(graph.edges):
-        if attrs[e] is None:
-            attrs[e] = entry(u, v, _uniform_cents(rng, *amount_conf["p2p"]["amount"]))
-    return attrs
-
-
-def _bfs_distance(adjacency: dict[int, list[int]], src: int, dst: int, cap: int) -> int | None:
-    """Undirected BFS capped at `cap`; None means farther than cap. Nodes visited in id order."""
-    if src == dst:
+def _bfs_distance(
+    adjacency: dict[int, list[int]], source: int, target: int, maximum: int
+) -> int | None:
+    if source == target:
         return 0
-    dist = {src: 0}
-    queue = [src]
-    for u in queue:
-        if dist[u] >= cap:
+    seen = {source}
+    queue = [(source, 0)]
+    for node_id, distance in queue:
+        if distance >= maximum:
             continue
-        for v in adjacency[u]:
-            if v not in dist:
-                dist[v] = dist[u] + 1
-                if v == dst:
-                    return dist[v]
-                queue.append(v)
+        for neighbor in adjacency[node_id]:
+            if neighbor == target:
+                return distance + 1
+            if neighbor not in seen:
+                seen.add(neighbor)
+                queue.append((neighbor, distance + 1))
     return None
 
 
-def _full_adjacency(graph: GeneratedGraph) -> dict[int, list[int]]:
-    adj: dict[int, list[int]] = {nd.tx_id: [] for nd in graph.nodes}
-    for u, v in graph.edges:
-        adj[u].append(v)
-        adj[v].append(u)
-    for lst in adj.values():
-        lst.sort()
-    return adj
-
-
-def _too_close(adjacency: dict[int, list[int]], a: int, b: int, min_distance: int) -> bool:
-    """True only when a real (measured) distance < min_distance; unreachable-within-cap is OK."""
-    d = _bfs_distance(adjacency, a, b, min_distance)
-    return d is not None and d < min_distance
+def _too_close(adjacency: dict[int, list[int]], first: int, second: int, minimum: int) -> bool:
+    distance = _bfs_distance(adjacency, first, second, minimum)
+    return distance is not None and distance < minimum
 
 
 def select_anchors(
     instances: list[PatternInstance], graph: GeneratedGraph, config: GeneratorConfig
 ) -> None:
-    """No RNG. Isolation >= min_anchor_distance over the full graph; budget target is a ceiling."""
-    cfg = config.anchors
-    target = cfg.per_1000_nodes * len(graph.nodes) // 1000
+    target = config.anchors.per_1000_nodes * len(graph.nodes) // 1000
     adjacency = _full_adjacency(graph)
     kept: list[int] = []
-    for inst in instances:
-        a = inst.anchor_node_id
-        if any(_too_close(adjacency, a, k, cfg.min_anchor_distance) for k in kept):
+    for instance in instances:
+        anchor = instance.anchor_node_id
+        if any(
+            _too_close(adjacency, anchor, other, config.anchors.min_anchor_distance)
+            for other in kept
+        ):
             continue
-        inst.anchored = True
-        kept.append(a)
+        instance.anchored = True
+        kept.append(anchor)
         if len(kept) >= target:
             break
 
 
 def k_hop_neighborhoods(
-    inst: PatternInstance, graph: GeneratedGraph, config: GeneratorConfig
+    instance: PatternInstance, graph: GeneratedGraph, config: GeneratorConfig
 ) -> dict[str, list[int]]:
-    """Nodes at exact hop distance k from the anchor, inside the instance (k in k_hop_range)."""
-    range_cfg = config.anchors.k_hop_range or [0]
-    max_k = min(inst.max_anchor_distance, max(range_cfg))
-    adj = _instance_adjacency(graph, inst.node_ids, inst.edge_ids)
-    dist = _bfs_layers(adj, inst.anchor_node_id)
-    return {str(k): sorted(n for n, d in dist.items() if d == k) for k in range(1, max_k + 1)}
+    hops = config.anchors.k_hop_range or (0,)
+    maximum = min(instance.max_anchor_distance, max(hops))
+    adjacency = _instance_adjacency(graph, instance.node_ids, instance.edge_ids)
+    distances = _bfs_layers(adjacency, instance.anchor_node_id)
+    return {
+        str(hop): sorted(node_id for node_id, distance in distances.items() if distance == hop)
+        for hop in range(1, maximum + 1)
+    }
 
 
-def detect_decoys(graph: GeneratedGraph, config: GeneratorConfig) -> list[dict]:
-    """Find accidental fan-in / cycle motifs among p2p edges and tag them as decoys. No RNG."""
-    if not config.background.decoy_detection:
-        return []
-    fan_in_threshold = config.background.fan_in_threshold
-    max_depth = config.background.cycle_max_depth
-
-    is_bg = {nd.tx_id: nd.scheme == "p2p" for nd in graph.nodes}
-    bg_edges = [(e, u, v) for e, (u, v) in enumerate(graph.edges) if is_bg[u] and is_bg[v]]
-
-    blocks: list[dict] = []
-
-    in_sources: dict[int, dict[int, int]] = {}  # target -> {source: edge_id}
-    for e, u, v in bg_edges:
-        in_sources.setdefault(v, {})[u] = e
-    for target in sorted(in_sources):
-        srcs = in_sources[target]
-        if len(srcs) >= fan_in_threshold:
-            edge_ids = sorted(srcs.values())
-            nodes = [target] + sorted(srcs)
-            blocks.append(
-                {"nodes": nodes, "edge_ids": edge_ids, "motif": "fan_in", "pattern_type": "p2p"}
-            )
-
-    adj: dict[int, list[tuple[int, int]]] = {n: [] for n, _ in is_bg.items() if is_bg[n]}
-    for e, u, v in bg_edges:
-        adj[u].append((v, e))
-        adj[v].append((u, e))
-    for lst in adj.values():
-        lst.sort()
-
-    edge_of: dict[int, int] = {}
-    path: list[int] = []
-    path_set: set[int] = set()
-    visited: set[int] = set()
-    seen_lots: set[tuple[int, ...]] = set()
-
-    def dfs(u: int, parent: int, depth: int) -> None:
-        visited.add(u)
-        path.append(u)
-        path_set.add(u)
-        for v, e in adj[u]:
-            if v == parent:
-                continue
-            if v in path_set:
-                if depth + 1 > max_depth:
-                    continue
-                start = path.index(v)
-                cycle = path[start:]
-                key = tuple(sorted(cycle))
-                if key in seen_lots:
-                    continue
-                seen_lots.add(key)
-                cycle_edges = [edge_of[path[i]] for i in range(start + 1, len(path))]
-                cycle_edges.append(e)
-                blocks.append(
-                    {
-                        "nodes": cycle,
-                        "edge_ids": sorted(cycle_edges),
-                        "motif": "cycle",
-                        "pattern_type": "p2p",
-                    }
-                )
-            elif v not in visited and depth + 1 <= max_depth:
-                edge_of[v] = e
-                dfs(v, u, depth + 1)
-        path.pop()
-        path_set.discard(u)
-
-    for start in sorted(adj):
-        if start not in visited:
-            dfs(start, -1, 0)
-    return blocks
+def instance_id_of(
+    graph: GeneratedGraph, instances: list[PatternInstance]
+) -> dict[int, int | None]:
+    mapping: dict[int, int | None] = {}
+    for instance in instances:
+        for node_id in instance.node_ids:
+            mapping[node_id] = instance.instance_id
+    for node in graph.nodes:
+        mapping.setdefault(node.tx_id, None)
+    return mapping
 
 
 def apply_holdout(instances: list[PatternInstance], config: GeneratorConfig) -> bool:
-    """Tag instances whose temporal window overlaps a holdout entry. Annotation only. No RNG."""
-    windows_active = bool(config.holdout.entries)
-    for inst in instances:
-        lo, hi = inst.temporal_window
+    for instance in instances:
         for entry in config.holdout.entries:
-            if inst.pattern_type != entry.get("pattern"):
+            if instance.pattern_type != entry["pattern"]:
                 continue
-            s_min = entry.get("step_min")
-            s_max = entry.get("step_max")
-            if s_min is None or s_max is None:
-                continue
-            if max(lo, s_min) <= min(hi, s_max):
-                inst.holdout = True
-                inst.train_excluded = bool(entry.get("train_excluded", True))
+            if max(instance.temporal_window[0], entry["step_min"]) <= min(
+                instance.temporal_window[1], entry["step_max"]
+            ):
+                instance.holdout = True
+                instance.train_excluded = entry["train_excluded"]
                 break
-    return windows_active
+    return bool(config.holdout.entries)
+
+
+__all__ = [
+    "PatternInstance",
+    "_articulation_points",
+    "_central_anchor",
+    "_eccentricity",
+    "apply_holdout",
+    "instance_id_of",
+    "k_hop_neighborhoods",
+    "select_anchors",
+]

@@ -1,0 +1,51 @@
+seed: 72
+n_txs: 10000
+stats_dir: data/volume
+out_dir: data/synthetic/behavior_run
+graph:
+  mode: behavior
+features:
+  mode: semantic
+behavior:
+  contract_version: behavior.p0.v1
+  profile_quotas:
+    ordinary_wallet: {entity_count: 120, tx_quota: 4000}
+    exchange_hub: {entity_count: 12, tx_quota: 1200}
+    miner_payout: {entity_count: 20, tx_quota: 800}
+    wallet_provider: {entity_count: 30, tx_quota: 1000}
+    individual: {entity_count: 180, tx_quota: 1800}
+    mixer: {entity_count: 8, tx_quota: 600}
+    wash_round_trip: {entity_count: 6, tx_quota: 600}
+  chains:
+    bitcoin: {enabled: true}
+    ethereum: {enabled: true}
+    tron: {enabled: true}
+  drift:
+    phases:
+      - phase_id: stable
+        step_min: 1
+        step_max: 39
+        illicit_keep_probability: 1.0
+        novel_profile_ids: []
+      - phase_id: shutdown
+        step_min: 40
+        step_max: 44
+        illicit_keep_probability: 0.0
+        novel_profile_ids: []
+      - phase_id: novel
+        step_min: 45
+        step_max: 49
+        illicit_keep_probability: 0.0
+        novel_profile_ids: [wash_round_trip]
+gnn:
+  backend: auto
+  hidden: 64
+  layers: 2
+  dropout: 0.25
+  learning_rate: 0.001
+  weight_decay: 0.0001
+  epochs: 300
+  patience: 30
+  threads: 1
+  k: 100
+  seeds: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
