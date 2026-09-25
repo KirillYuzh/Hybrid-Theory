@@ -1,6 +1,6 @@
 ---
 name: generator
-description: Навигация по Hybrid-Theory: behavior-driven генератор, проверка данных и strict downstream
+description: Навигация по Hybrid-Theory
 ---
 
 Начинай с `README.md`, затем читай `docs/overview.md` и `docs/behavior-model.md`.
